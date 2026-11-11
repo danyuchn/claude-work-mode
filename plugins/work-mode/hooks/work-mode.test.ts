@@ -265,6 +265,26 @@ test('B: custom nudge pattern, threshold and template', async ($, on) => {
   expect((await post(500)).additionalContext).toBe(undefined)
 })
 
+test('B: subagentsDelegate false: a subagent is not delegation, its reads count, the nudge reaches the main thread', async ($, on) => {
+  world(on, { files: { [CFG_PATH]: JSON.stringify({ dispatch: { subagentsDelegate: false } }) } })
+  await start($)
+  await $.command.run(run('out'))
+  await $.classic.UserPromptSubmit({ prompt: 'go', session_id: 'sid-1' } as never)
+  const post = (extra: object, n: number, input: object = {}, tool = 'Read') =>
+    $.classic.PostToolUse({ tool_name: tool, tool_input: input, tool_response: 'x'.repeat(n), tool_use_id: 't', ...extra } as never)
+  expect((await post({}, 1, {}, 'Agent')).additionalContext).toBe(undefined)
+  // The subagent trips the count but never sees the nudge; the main thread gets it once.
+  expect((await post({ agent_id: 'sub1' }, 25000)).additionalContext).toBe(undefined)
+  expect((await post({}, 1, {}, 'Agent')).additionalContext?.at(-1)).toContain('[dispatch-nudge]')
+  expect((await post({}, 90000)).additionalContext).toBe(undefined)
+  // An external command, even run by a subagent, still counts as delegating.
+  await $.classic.UserPromptSubmit({ prompt: 'next', session_id: 'sid-1' } as never)
+  expect((await post({ agent_id: 'sub1' }, 1, { command: 'codex exec review' }, 'Bash')).additionalContext).toBe(undefined)
+  expect((await post({}, 90000)).additionalContext).toBe(undefined)
+  expect(resolveConfig({}).dispatch.subagentsDelegate).toBe(true)
+  expect(resolveConfig({ dispatch: { subagentsDelegate: 'no' } }).dispatch.subagentsDelegate).toBe(true)
+})
+
 test('B: WORK_MODE_CONFIG with ~ points at another file; removing it resets to defaults', async ($, on) => {
   const files: Record<string, string> = { '/home/u/elsewhere.json': JSON.stringify({ userName: 'Bob', pronouns: 'he' }) }
   world(on, { files, env: { WORK_MODE_CONFIG: '~/elsewhere.json' } })

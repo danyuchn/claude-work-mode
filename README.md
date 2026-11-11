@@ -62,6 +62,7 @@ To personalise, create `~/.config/work-mode/config.json` (or point `WORK_MODE_CO
 | `dispatch.commandPattern` | `codex exec`, `gemini`, `claude -p` | a Bash command matching this regex counts as delegating |
 | `dispatch.nudgeThresholdChars` | `20000` | raw output read before the nudge fires (env `DISPATCH_NUDGE_CHARS` overrides) |
 | `dispatch.nudgeTemplate` | built in | nudge text; `{chars}` is filled in |
+| `dispatch.subagentsDelegate` | `true` | `false` when Claude subagents spend the same quota you want to save: spawning one no longer counts as delegating, and what they read counts toward the nudge (shown to the main thread) |
 | `dispatch.quotaFile` / `poolRouting` | none | optional quota table (see below) |
 | `converge.sectionHeading` | `Decisions Needed` / `待你決定` | heading for decision items |
 | `converge.decisionLabels` / `tradeoffLabel` | `outbound payment delete permission tradeoff` | labels each decision must start with |

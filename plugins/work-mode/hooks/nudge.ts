@@ -7,15 +7,19 @@ import type { WorkModeConfig } from './tempo'
 // When the main thread has pulled a lot of raw material into context this turn
 // (Read/Bash/Grep output) without delegating anything, say once that this batch could
 // go to a subagent or an external CLI. Only with /work-mode out.
+// With dispatch.subagentsDelegate false, Claude subagents spend the same quota: their reads
+// count too, spawning one is not delegating, and a nudge they trip waits for the main thread.
 
 let chars = 0
 let dispatched = false
 let nudged = false
+let due: string | undefined
 
 export function resetNudge(): void {
   chars = 0
   dispatched = false
   nudged = false
+  due = undefined
 }
 
 export function responseLength(v: unknown): number {
@@ -44,16 +48,19 @@ function dispatchPattern(cfg: WorkModeConfig): RegExp {
   return pattern
 }
 
-/** Feeds one finished tool call in; returns the nudge text the one time it is due. */
+/** Feeds one finished tool call in (`subagent`: it ran inside a subagent); returns the nudge text the one time it is due. */
 export function observe(
   tool: string,
   input: unknown,
   response: unknown,
   threshold: number = getConfig().dispatch.nudgeThresholdChars,
   cfg: WorkModeConfig = getConfig(),
+  subagent = false,
 ): string | undefined {
+  const viaClaude = cfg.dispatch.subagentsDelegate
+  if (subagent && viaClaude) return undefined
   const cmd = String((input as { command?: unknown } | null)?.command ?? '')
-  if (tool === 'Agent' || tool === 'Workflow' || dispatchPattern(cfg).test(cmd)) dispatched = true
+  if ((viaClaude && (tool === 'Agent' || tool === 'Workflow')) || dispatchPattern(cfg).test(cmd)) dispatched = true
   if (tool === 'Read' || tool === 'Bash' || tool === 'Grep') chars += responseLength(response)
   if (!dispatched && !nudged && chars >= threshold) {
     nudged = true
@@ -66,14 +73,19 @@ export function registerNudge(on: On): void {
   // One PostToolUse hook for the module: it also carries a /work-mode switch made mid-turn.
   on('classic.PostToolUse', async ($, e, next) => {
     const r = await next(e)
-    // Subagents do their own job; only the main thread decides routing.
-    if (e.agent_id) return r
-    const extra = await takePending($)
+    const sub = Boolean(e.agent_id)
+    // Only the main thread decides routing, so notices are never handed to a subagent.
+    const extra = sub ? [] : await takePending($)
     if (await dispatchOn($)) {
       const cfg = await ensureConfig($)
       const raw = Number(await $.env.get('DISPATCH_NUDGE_CHARS'))
-      const text = observe(e.tool_name, e.tool_input, e.tool_response, raw > 0 ? raw : cfg.dispatch.nudgeThresholdChars, cfg)
-      if (text !== undefined) extra.push(text)
+      const text = observe(e.tool_name, e.tool_input, e.tool_response, raw > 0 ? raw : cfg.dispatch.nudgeThresholdChars, cfg, sub)
+      if (text !== undefined) due = text
+    }
+    if (sub) return r
+    if (due !== undefined) {
+      extra.push(due)
+      due = undefined
     }
     return extra.length === 0 ? r : { ...r, additionalContext: [...(r.additionalContext ?? []), ...extra] }
   })

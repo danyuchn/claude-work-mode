@@ -30,6 +30,12 @@ export interface WorkModeConfig {
     instructions?: string[]
     /** A Bash command matching this regex counts as delegating (the nudge then stays quiet). */
     commandPattern: string
+    /**
+     * true (default): a Claude subagent (Agent/Workflow call) counts as delegating.
+     * false: subagents spend the same quota as the main thread, so spawning one does not count,
+     * and what they read adds to the nudge count; only commandPattern counts as delegating.
+     */
+    subagentsDelegate: boolean
     nudgeThresholdChars: number
     /** Replaces the nudge text; `{chars}` is filled with the count. */
     nudgeTemplate?: string
@@ -58,6 +64,7 @@ export const DEFAULT_CONFIG_EN: WorkModeConfig = {
   dispatch: {
     pickerHint: 'subagents / external CLI',
     commandPattern: DEFAULT_PATTERN,
+    subagentsDelegate: true,
     nudgeThresholdChars: 20000,
   },
   converge: {
@@ -148,6 +155,7 @@ export function resolveConfig(raw: unknown, fallbackLocale: Locale = 'en'): Work
   const dispatch: WorkModeConfig['dispatch'] = {
     pickerHint: str(d.pickerHint, base.dispatch.pickerHint),
     commandPattern: validPattern(d.commandPattern) ?? base.dispatch.commandPattern,
+    subagentsDelegate: typeof d.subagentsDelegate === 'boolean' ? d.subagentsDelegate : base.dispatch.subagentsDelegate,
     nudgeThresholdChars: threshold,
   }
   const instructions = optList(d.instructions)

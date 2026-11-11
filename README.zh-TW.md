@@ -61,6 +61,7 @@
 | `dispatch.instructions` | 內建 | 整段取代 `out` 說明，一行一條 |
 | `dispatch.commandPattern` | `codex exec`、`gemini`、`claude -p` | Bash 指令符合這個正規式就算已外派 |
 | `dispatch.nudgeThresholdChars` | `20000` | 讀進多少字元才提醒（環境變數 `DISPATCH_NUDGE_CHARS` 可覆寫） |
+| `dispatch.subagentsDelegate` | `true` | 設 `false` 時 Claude 子代理算同一份額度：開子代理不算外派，子代理讀進的內容也算進提醒門檻（提醒只給主線） |
 | `dispatch.nudgeTemplate` | 內建 | 提醒文字，`{chars}` 會換成字元數 |
 | `dispatch.quotaFile`／`poolRouting` | 無 | 選用的額度表（見下） |
 | `converge.sectionHeading` | `待你決定`／`Decisions Needed` | 待決區塊標題 |
