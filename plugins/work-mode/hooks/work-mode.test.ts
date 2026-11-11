@@ -5,6 +5,7 @@ import { DEFAULT_CONFIG_EN, DEFAULT_CONFIG_ZH, localeFrom, resolveConfig, resolv
 import { nudgeText, observe, resetNudge, responseLength } from './nudge'
 import {
   autonomousText,
+  comboText,
   convergeText,
   dispatchText,
   parseTempo,
@@ -131,6 +132,8 @@ test('A: default texts in both locales carry nothing personal', () => {
       switchReply(['converge'], undefined, cfg),
       ...switchTexts(['dispatch'], ['autonomous', 'converge'], false, undefined, cfg),
       ...switchTexts(['dispatch'], [], true, undefined, cfg),
+      ...switchTexts([], ['dispatch', 'converge'], false, undefined, cfg),
+      switchReply(['dispatch', 'converge'], undefined, cfg),
       ...pickerLabels(['autonomous'], cfg),
     ])
   }
@@ -291,7 +294,8 @@ test('tempo arguments and labels', () => {
   expect(parseTempo(' Dispatch ')).toEqual({ kind: 'set', modes: ['dispatch'] })
   expect(parseTempo('autonomous+dispatch')).toEqual({ kind: 'set', modes: ['autonomous', 'dispatch'] })
   expect(parseTempo('wrap auto')).toEqual({ kind: 'set', modes: ['autonomous', 'converge'] })
-  expect(parseTempo('wrap out')).toMatchObject({ kind: 'set', modes: ['converge'] })
+  expect(parseTempo('wrap out')).toEqual({ kind: 'set', modes: ['dispatch', 'converge'] })
+  expect(parseTempo('auto out wrap')).toEqual({ kind: 'set', modes: ['autonomous', 'dispatch', 'converge'] })
   expect(parseTempo('off')).toEqual({ kind: 'set', modes: [] })
   expect(parseTempo('fast').kind).toBe('error')
   expect(tempoLabel([])).toBe(undefined)
@@ -304,7 +308,7 @@ test('picker: labels in both locales, commas in the hint never split an answer',
   expect(en.length).toBe(4)
   expect(en[1]).toBe('out - delegate (custom-cli/ fast)')
   expect(pickerLabels([], cfg).length).toBe(3)
-  expect(parseTempo(pickedArgs(en.join(', '), cfg))).toMatchObject({ kind: 'set', modes: ['autonomous', 'converge'] })
+  expect(parseTempo(pickedArgs(en.join(', '), cfg))).toEqual({ kind: 'set', modes: ['autonomous', 'dispatch', 'converge'] })
   expect(parseTempo(pickedArgs(`${en[1]}, ${en[0]}`, cfg))).toEqual({ kind: 'set', modes: ['autonomous', 'dispatch'] })
   const zcfg = resolveConfig({ ...CUSTOM, locale: 'zh-TW' })
   const zh = pickerLabels(['dispatch'], zcfg)
@@ -345,4 +349,15 @@ test('pool line: routing sentences come from config, defaults name no private to
   expect(poolLine(q({ ...floor('floor_7d'), route_reset_ts: now - 1 }, { route: 'open' }), now, resolveConfig(CUSTOM))).toContain('BOTH-OPEN')
   expect(poolLine('not json')).toBe(undefined)
   expect(poolLine(JSON.stringify([{ pool: 'agy' }]))).toBe(undefined)
+})
+
+test('out + wrap: combo text is sent once, only when both are on', () => {
+  const cfg = DEFAULT_CONFIG_EN
+  const tag = '[tempo: dispatch + converge]'
+  expect(switchTexts([], ['dispatch', 'converge'], false, undefined, cfg).some(x => x.startsWith(tag))).toBe(true)
+  expect(switchTexts(['converge'], ['dispatch', 'converge'], true, undefined, cfg).some(x => x.startsWith(tag))).toBe(true)
+  expect(switchTexts(['dispatch', 'converge'], ['autonomous', 'dispatch', 'converge'], true, undefined, cfg).some(x => x.startsWith(tag))).toBe(false)
+  expect(switchTexts([], ['converge'], false, undefined, cfg).some(x => x.startsWith(tag))).toBe(false)
+  expect(comboText({ ...cfg, converge: { ...cfg.converge, autoCloseCommand: '/checkpoint' } })).toContain('/checkpoint waits for it')
+  expect(switchReply(['dispatch', 'converge'], undefined, cfg)).toContain('only finishes work already open')
 })

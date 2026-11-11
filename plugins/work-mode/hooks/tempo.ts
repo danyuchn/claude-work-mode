@@ -11,7 +11,8 @@ export type { WorkModeConfig } from './config'
 // /work-mode: per-session working modes. State lives in $.state, so it never leaks to other sessions.
 // Typed as short words: auto, out, wrap (long internal names still accepted).
 // Any words, any order (`/work-mode wrap auto`); the result replaces the current modes.
-// out and wrap exclude each other: typed together, wrap wins (finishing beats opening new jobs).
+// out and wrap combine: delegation then covers only work already open, and delegated jobs
+// count as open until their results are verified (see comboText).
 // PreToolUse gates are shell hooks and cannot read $.state, so the modes are also written
 // to ~/.claude/state/tempo/<session_id> (read by work-mode-gates' hooks/lib/tempo-auto.sh).
 const modes = atom({ plugin: 'work-mode', key: 'tempo' } as const, [] as TempoMode[])
@@ -103,6 +104,18 @@ export function autonomousText(cfg: WorkModeConfig = getConfig()): string {
   ].join('\n')
 }
 
+/** Sent when out and wrap are both on: delegate to finish, never to open new work. */
+export function comboText(cfg: WorkModeConfig = getConfig()): string {
+  const close = cfg.converge.autoCloseCommand ?? 'the closing line'
+  return [
+    '[tempo: dispatch + converge] out and wrap are both on: delegation serves finishing.',
+    'Delegate only pieces of work that is already open (remaining checks, extraction, fixes, review of what is on the table); never delegate a new branch of work.',
+    `A delegated job counts as open until its result is back and verified on the main thread; ${close} waits for it.`,
+  ].join('\n')
+}
+
+const both = (l: readonly TempoMode[]) => l.includes('dispatch') && l.includes('converge')
+
 export function modeText(m: TempoMode, cfg: WorkModeConfig = getConfig()): string {
   return m === 'dispatch' ? dispatchText(cfg) : m === 'converge' ? convergeText(cfg) : autonomousText(cfg)
 }
@@ -188,6 +201,7 @@ export function switchTexts(
     out.push(modeText(m, cfg))
     if (m === 'dispatch' && pools !== undefined) out.push(pools)
   }
+  if (both(next) && !(prevSent && both(prev))) out.push(comboText(cfg))
   return out
 }
 
@@ -215,13 +229,7 @@ export function parseTempo(arg: string): TempoParse {
     if (!mode) return { kind: 'error', message: `Unknown mode "${w}".` }
     picked.add(mode)
   }
-  let note: string | undefined
-  if (picked.has('converge') && picked.has('dispatch')) {
-    picked.delete('dispatch')
-    note = 'out dropped: wrap and out exclude each other, wrap wins (jobs already out still finish).'
-  }
-  const result = ORDER.filter(m => picked.has(m))
-  return note ? { kind: 'set', modes: result, note } : { kind: 'set', modes: result }
+  return { kind: 'set', modes: ORDER.filter(m => picked.has(m)) }
 }
 
 // The picker shown by a bare /work-mode is a multi-select: tick any mix, it replaces the
@@ -338,6 +346,7 @@ async function modeTexts($: EngineInterface, list: readonly TempoMode[]): Promis
       out.push(modeText(m, cfg))
       if (m === 'dispatch' && pools !== undefined) out.push(pools)
     }
+    if (both(list)) out.push(comboText(cfg))
     return out
   }
   if (pools === undefined || pools === (await read($, poolsSent))) return []
@@ -360,6 +369,7 @@ export function switchReply(m: readonly TempoMode[], note: string | undefined, c
       ? `The delegation reminder (${cfg.dispatch.pickerHint}) reaches the model once, with its next tool result or prompt. `
       : '') +
     (m.includes('converge') ? 'No new branches; replies end with decisions plus recommendations. ' : '') +
+    (both(m) ? 'Delegation only finishes work already open. ' : '') +
     '/work-mode off to stop.' +
     tail
   )

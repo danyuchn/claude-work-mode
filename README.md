@@ -11,7 +11,7 @@ Session work modes for [Claude Code](https://claude.com/claude-code), switched w
 | `wrap` | Converge: open no new branches, finish what is open, list only new or changed decisions, each with a label and a recommendation. |
 | `off` | Back to normal. |
 
-Modes are per session, combine freely (`/work-mode auto wrap`), and `wrap` wins over `out` when both are typed. A bare `/work-mode` opens a multi-select picker. The mode text reaches the model once (with the next tool result or prompt) and again only after a compaction or resume, so it does not bloat every turn.
+Modes are per session, combine freely (`/work-mode auto wrap`), and `out wrap` together delegates only the work already open: delegated jobs count as open until their results are verified, so wrap's close waits for them. A bare `/work-mode` opens a multi-select picker. The mode text reaches the model once (with the next tool result or prompt) and again only after a compaction or resume, so it does not bloat every turn.
 
 ## Demo (60s Walkthrough)
 
