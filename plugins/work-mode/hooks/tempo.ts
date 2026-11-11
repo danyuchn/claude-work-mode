@@ -302,7 +302,7 @@ export async function tempoStart($: EngineInterface): Promise<void> {
   await $.command.register({
     name: 'work-mode',
     description: 'Work mode: auto (no questions) | out (delegate) | wrap (converge) | off',
-    argumentHint: '[auto] [out|wrap] | off',
+    argumentHint: '[auto] [out] [wrap] | off',
     immediate: true,
   })
   await update($, sent, () => false)
