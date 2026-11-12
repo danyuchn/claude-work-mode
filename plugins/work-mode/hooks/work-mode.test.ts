@@ -549,3 +549,20 @@ test('C: with subagentsDelegate false an Agent call is refused until its prompt 
   expect(denyOf(gate('WebFetch', { url: 'https://x/2' }, 100, cfg))).toContain('[dispatch-gate]')
   expect(gate('Read', { file_path: '/a' }, 100, cfg)).toBeDefined()
 })
+
+test('C: a dispatch command may carry a path or env prefix; a mention inside arguments is not a dispatch', () => {
+  const cfg = { ...DEFAULT_CONFIG_EN, dispatch: { ...DEFAULT_CONFIG_EN.dispatch, commandPattern: '(^|[\\s;&|(/])(custom-cli|codex\\s+exec)\\s' } }
+  for (const cmd of ['~/bin/custom-cli run x', 'QUIET=1 ~/bin/custom-cli run x', 'cd a && timeout 300 custom-cli run x', '/opt/codex exec review']) {
+    resetNudge()
+    observe('Bash', { command: cmd }, 'a', 100, cfg)
+    expect(gate('Read', { file_path: '/a' }, 100, cfg)).toBe(undefined)
+    observe('Read', {}, 'x'.repeat(150), 100, cfg)
+    expect(gate('Read', { file_path: '/a' }, 100, cfg)).toBe(undefined) // dispatched: no gate
+  }
+  for (const cmd of ['grep -n custom-cli hooks/*.sh', 'git commit -m "custom-cli later"', 'echo custom-cli x']) {
+    resetNudge()
+    observe('Bash', { command: cmd }, 'a', 100, cfg)
+    observe('Read', {}, 'x'.repeat(150), 100, cfg)
+    expect(denyOf(gate('Read', { file_path: '/a' }, 100, cfg))).toBeDefined()
+  }
+})

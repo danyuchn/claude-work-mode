@@ -140,10 +140,15 @@ function segments(visible: string): string[] {
   return visible.split(/[;&|()\n]+/).map(s => s.trim()).filter(Boolean)
 }
 
+/** The segment's command is a dispatch: the pattern matches where only env assignments and a path may precede it. */
 function isDispatch(visible: string, cfg: WorkModeConfig): boolean {
   return segments(visible).some(s => {
     const match = dispatchPattern(cfg).exec(s)
-    return match !== null && match.index === 0
+    if (match === null) return false
+    const before = s.slice(0, match.index)
+    const prefix = '^(?:\\w+=\\S*\\s+)*(?:(?:timeout|nohup|exec)\\s+(?:-\\S+\\s+)*\\d*\\s*)?'
+    // matched at a `/`: a path may precede; matched at a space: only env assignments or timeout may
+    return new RegExp(prefix + (s[match.index] === '/' ? '[\\w~./-]*$' : '$')).test(before)
   })
 }
 
