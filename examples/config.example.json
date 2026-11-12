@@ -23,12 +23,24 @@
       "bothBlocked": "Both pools are past the floor: keep batches in a sonnet subagent.",
       "agyBlocked": "agy is past the floor: send batch work to codex instead.",
       "codexBlocked": "codex is past the floor: send code review to a subagent instead.",
-      "bothOpen": "Both are open: route as above."
-    }
+      "bothOpen": "Both are open: route as above.",
+      "prefer": "Spend {pool} first this week: it resets in {reset} with {used} used.",
+      "claudeSoon": "The main model's week resets in {reset} at {used}: inline reading is cheap now; batches still go out."
+    },
+    "readGate": true,
+    "corpusPattern": "\\.jsonl$|/transcripts?/|\\.(srt|vtt)$",
+    "gateTemplate": "[dispatch-gate] out is on and {chars} characters are already read this turn: hand the rest to a subagent or codex ({hint}), or run `: # work-mode: inline <why>` to keep reading here."
   },
+  "reminderEveryTurns": 8,
   "converge": {
     "sectionHeading": "Decisions Needed",
-    "decisionLabels": ["outbound", "payment", "delete", "permission", "tradeoff"],
+    "decisionLabels": [
+      "outbound",
+      "payment",
+      "delete",
+      "permission",
+      "tradeoff"
+    ],
     "tradeoffLabel": "tradeoff",
     "autoCloseCommand": null
   }

@@ -12,6 +12,10 @@ export interface PoolRouting {
   agyBlocked: string
   codexBlocked: string
   bothOpen: string
+  /** Which open pool to spend first; `{pool}`, `{used}` and `{reset}` are filled in. */
+  prefer: string
+  /** Added when the main model's own weekly window resets before every external pool's and has room. */
+  claudeSoon: string
 }
 
 export interface WorkModeConfig {
@@ -39,10 +43,22 @@ export interface WorkModeConfig {
     nudgeThresholdChars: number
     /** Replaces the nudge text; `{chars}` is filled with the count. */
     nudgeTemplate?: string
+    /**
+     * true (default): under out, once the turn's raw reading passes nudgeThresholdChars with nothing
+     * delegated, further Read / Grep / reader Bash calls are refused with a how-to, until the model
+     * delegates or declares why it reads inline (a no-op Bash `: # work-mode: inline <reason>`).
+     */
+    readGate: boolean
+    /** Paths matching this regex are batch material: under out their first read is refused outright. */
+    corpusPattern?: string
+    /** Replaces the gate's refusal text; `{chars}` and `{hint}` are filled in. */
+    gateTemplate?: string
     /** Optional quota table (JSON array of {pool: "agy"|"codex", ...}); read only when set. */
     quotaFile?: string
     poolRouting?: PoolRouting
   }
+  /** Every N user prompts while a mode is on, a one-line reminder of the modes rides with the prompt; 0 = off. */
+  reminderEveryTurns: number
   converge: {
     sectionHeading: string
     decisionLabels: string[]
@@ -66,7 +82,9 @@ export const DEFAULT_CONFIG_EN: WorkModeConfig = {
     commandPattern: DEFAULT_PATTERN,
     subagentsDelegate: true,
     nudgeThresholdChars: 20000,
+    readGate: true,
   },
+  reminderEveryTurns: 8,
   converge: {
     sectionHeading: 'Decisions Needed',
     decisionLabels: ['outbound', 'payment', 'delete', 'permission', 'tradeoff'],
@@ -95,6 +113,8 @@ export const DEFAULT_POOL_ROUTING: PoolRouting = {
   agyBlocked: 'agy is past the floor: send that batch work to codex or a background subagent instead.',
   codexBlocked: 'codex is past the floor: send code review and fixes to agy or a background subagent instead.',
   bothOpen: 'Both are open: route as above.',
+  prefer: 'Spend {pool} first: its weekly window resets in {reset} with {used} used, so what is left expires soonest.',
+  claudeSoon: "The main model's own week resets in {reset} at {used}: reading inline costs little right now, but verifiable batches still go out.",
 }
 
 let current: WorkModeConfig = DEFAULT_CONFIG_EN
@@ -157,7 +177,11 @@ export function resolveConfig(raw: unknown, fallbackLocale: Locale = 'en'): Work
     commandPattern: validPattern(d.commandPattern) ?? base.dispatch.commandPattern,
     subagentsDelegate: typeof d.subagentsDelegate === 'boolean' ? d.subagentsDelegate : base.dispatch.subagentsDelegate,
     nudgeThresholdChars: threshold,
+    readGate: typeof d.readGate === 'boolean' ? d.readGate : base.dispatch.readGate,
   }
+  const corpus = validPattern(d.corpusPattern)
+  if (corpus) dispatch.corpusPattern = corpus
+  if (typeof d.gateTemplate === 'string' && d.gateTemplate.trim() !== '') dispatch.gateTemplate = d.gateTemplate
   const instructions = optList(d.instructions)
   if (instructions) dispatch.instructions = instructions
   if (typeof d.nudgeTemplate === 'string' && d.nudgeTemplate.trim() !== '') dispatch.nudgeTemplate = d.nudgeTemplate
@@ -168,8 +192,12 @@ export function resolveConfig(raw: unknown, fallbackLocale: Locale = 'en'): Work
       agyBlocked: str(pr.agyBlocked, DEFAULT_POOL_ROUTING.agyBlocked),
       codexBlocked: str(pr.codexBlocked, DEFAULT_POOL_ROUTING.codexBlocked),
       bothOpen: str(pr.bothOpen, DEFAULT_POOL_ROUTING.bothOpen),
+      prefer: str(pr.prefer, DEFAULT_POOL_ROUTING.prefer),
+      claudeSoon: str(pr.claudeSoon, DEFAULT_POOL_ROUTING.claudeSoon),
     }
   }
+  const every = r.reminderEveryTurns
+  const reminderEveryTurns = typeof every === 'number' && every >= 0 && Number.isFinite(every) ? Math.floor(every) : base.reminderEveryTurns
   const labels = strList(c.decisionLabels, base.converge.decisionLabels).filter(l => l.trim() !== '')
   const decisionLabels = labels.length > 0 ? labels : base.converge.decisionLabels
   const tradeoff = str(c.tradeoffLabel, base.converge.tradeoffLabel)
@@ -179,6 +207,7 @@ export function resolveConfig(raw: unknown, fallbackLocale: Locale = 'en'): Work
     pronouns: r.pronouns === 'he' || r.pronouns === 'she' || r.pronouns === 'they' ? r.pronouns : base.pronouns,
     autonomous: { extraRules: strList(a.extraRules, base.autonomous.extraRules) },
     dispatch,
+    reminderEveryTurns,
     converge: {
       sectionHeading: str(c.sectionHeading, base.converge.sectionHeading),
       decisionLabels,

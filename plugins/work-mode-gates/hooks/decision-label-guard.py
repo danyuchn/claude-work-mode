@@ -15,6 +15,15 @@ Labels and the heading can be customised in the work-mode config file
 (${WORK_MODE_CONFIG:-~/.config/work-mode/config.json}: converge.decisionLabels,
 converge.tradeoffLabel, converge.sectionHeading). Without one, both label sets are accepted.
 
+Under /work-mode wrap, a decisions section whose every item already appeared, unchanged, in one of
+the last few replies (read from the transcript tail) is blocked: wrap shows a decision once and then
+only the open count, except in a final report or when asked to relist.
+
+Under /work-mode auto (the session's modes file in ~/.claude/state/tempo, or $TEMPO_STATE_DIR),
+the reply's closing lines may not end on an offer-question to the user ("要我先擬好嗎？",
+"Shall I go ahead and ...?"): auto means do it, or put a hard stop on the pending list with a
+label and a recommendation. A line that carries a decision label is left alone.
+
 Fail-open on parse problems; the second pass (stop_hook_active) always passes.
 """
 import json
@@ -168,6 +177,166 @@ def _items(msg: str) -> list:
     return out
 
 
+# An offer to do an internal step, phrased as a question, in the reply's closing lines.
+OFFER_ZH = re.compile(
+    r"(?:要不要|需不需要|是否(?:需)?要|還要不要|要|需要|想要|希望)\s*我\s*(?:們)?\s*(?:先|再|來|幫你|替你|直接|就)?[^。！!\n]{0,60}?[嗎呢]?\s*[？?]"
+    r"|我\s*(?:可以|能|來|現在|先|要不要)[^。！!\n]{0,50}?(?:嗎|好嗎|好不好|行嗎|可以嗎)\s*[？?]"
+    # "say the word and I will": the offer without a question mark
+    r"|(?:要的話|需要的話|想要的話|你點頭|你說一聲|回一聲|回我一聲)[^。！!\n]{0,12}(?:我(?:就|再|馬上|立刻)|就)[^。！!\n]{0,40}"
+)
+OFFER_EN = re.compile(
+    r"\b(?:shall|should|can|could|may|do you want|would you like|want)\b[^.!?\n]{0,12}\b(?:I|me|us|we)\b[^.!?\n]{0,100}\?"
+    r"|\b(?:say the word|just say so|let me know)\b[^.!?\n]{0,20}\b(?:and I|I will|I'll|I can)\b[^.!?\n]{0,80}",
+    re.I,
+)
+TAIL_CHARS = 700
+HARD_STOP_OR_FACT = re.compile(r"寄|發送|送出|傳給|刪除|刪掉|付款|退款|轉帳|權限|安裝|密碼|憑證|正式|production|send|email|delete|pay|refund|install|permission|credential|password|deploy|which|哪一個|哪個|你的|your", re.I)
+
+
+def offers(msg: str) -> list:
+    """Offer-questions in the closing lines, outside code blocks and labeled decision items."""
+    text = re.sub(r"```.*?```", " ", msg, flags=re.S)
+    paragraphs = re.split(r"\n\s*\n", text.rstrip())
+    tail = "\n".join((paragraphs[-1], "\n".join(text.splitlines()[-3:])))
+    out = []
+    for ln in dict.fromkeys(tail.splitlines()):
+        if LABEL.search(ln) or HARD_STOP_OR_FACT.search(ln) or ln.lstrip().startswith(">"):
+            continue
+        for rx in (OFFER_ZH, OFFER_EN):
+            m = rx.search(ln)
+            if m:
+                out.append(m.group(0).strip()[:80])
+                break
+    return out
+
+
+def modes_on(data: dict) -> list:
+    sid = data.get("session_id")
+    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", sid):
+        return []
+    base = os.environ.get("TEMPO_STATE_DIR") or os.path.expanduser("~/.claude/state/tempo")
+    try:
+        with open(os.path.join(base, sid), encoding="utf-8") as f:
+            modes = json.load(f).get("modes") or []
+        return modes if isinstance(modes, list) and all(isinstance(m, str) for m in modes) else []
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def auto_on(data: dict) -> bool:
+    return "autonomous" in modes_on(data)
+
+
+# ---- reposted decisions (wrap) -------------------------------------------------------------
+# Under wrap a decision item is shown once; later replies end with the open count. The transcript
+# tail gives the earlier replies: when every item in this reply's section already appeared in one
+# of the last PRIOR_REPLIES assistant replies, unchanged, the reply is blocked. A reply that is
+# a final report, or answers a request to relist, passes.
+PRIOR_REPLIES = 6
+TAIL_BYTES = 2_000_000
+RELIST = re.compile(r"最終回報|最後回報|完整清單|全部列|重列|再列一次|列出.{0,6}(?:待|決定)|final report|full list|relist|list (?:them|all)", re.I)
+
+
+def item_key(item: str) -> str:
+    """The item's own words, without label, markers, counts or punctuation, cut short."""
+    t = re.sub(r"^(?:\d+[.)、]|[-*])\s+", "", item.strip())
+    t = LABEL.sub("", t)
+    t = re.sub(r"[\s*_`#【】\[\]（）()：:，,。.、！!？?～~\-]+", "", t)
+    return t[:40]
+
+
+def item_keys(msg: str) -> set:
+    return {item_key(b[0]) for b in _items(msg) if item_key(b[0])}
+
+
+def prior_replies(data: dict) -> list:
+    """Assistant texts before the current reply, newest first, from the transcript tail."""
+    path = data.get("transcript_path")
+    if not isinstance(path, str) or not path.endswith(".jsonl"):
+        return []
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > TAIL_BYTES:
+                f.seek(size - TAIL_BYTES)
+                f.readline()
+            raw = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    out = []
+    last_user = ""
+    for ln in raw.splitlines():
+        try:
+            d = json.loads(ln)
+        except ValueError:
+            continue
+        if d.get("isSidechain"):
+            continue
+        msg = d.get("message") or {}
+        content = msg.get("content")
+        if d.get("type") == "user":
+            if isinstance(content, str):
+                last_user = content
+            elif isinstance(content, list):
+                texts = [x.get("text") for x in content if isinstance(x, dict) and x.get("type") == "text"]
+                if texts:
+                    last_user = "\n".join(t for t in texts if isinstance(t, str))
+            continue
+        if not isinstance(content, list):
+            continue
+        texts = [x.get("text") for x in content if isinstance(x, dict) and x.get("type") == "text"]
+        texts = [t for t in texts if isinstance(t, str) and t.strip()]
+        if texts:
+            out.append(("\n".join(texts), last_user))
+    return out[::-1]
+
+
+def reposted(msg: str, data: dict) -> list:
+    """Items in this reply's decisions section that an earlier reply already showed, when none is new."""
+    keys = item_keys(msg)
+    if not keys or RELIST.search(msg):
+        return []
+    prior = prior_replies(data)
+    if not prior:
+        return []
+    cur = msg.strip()
+    # the transcript may already hold this very reply: skip it
+    if prior and prior[0][0].strip() == cur:
+        prior = prior[1:]
+    if prior and RELIST.search(prior[0][1] if len(prior[0]) > 1 else ""):
+        return []
+    seen = set()
+    for text, _ in prior[:PRIOR_REPLIES]:
+        seen |= item_keys(text)
+    if keys and keys <= seen:
+        return sorted(keys)
+    return []
+
+
+def repost_reason(msg: str, found: list) -> str:
+    n = len(found)
+    if is_english(msg) or not re.search(r"[\u4e00-\u9fff]", msg[-TAIL_CHARS:]):
+        return (f"WRAP GUARD: all {n} decision item(s) in this reply were already shown in an earlier reply, unchanged. "
+                "Work mode wrap is on: show a decision only when it is new or its status changed; otherwise drop the "
+                "section and end with one line giving how many decisions are still open. Relist in full only when asked "
+                "or in the final report (say so in the reply).")
+    return (f"WRAP GUARD：這則回覆「待你決定」裡的 {n} 項先前都已經列過、狀態沒變。"
+            "work mode wrap 開著：只在新增或狀態改變時才列；否則拿掉整段，結尾只用一行寫還有幾項待決。"
+            "要完整重列只在他要求、或最終回報時（回覆裡寫明是最終回報）。")
+
+
+def offer_reason(msg: str, found: list) -> str:
+    quoted = "\n  ".join(found)
+    if is_english(msg) or not re.search(r"[\u4e00-\u9fff]", msg[-TAIL_CHARS:]):
+        return ("AUTO GUARD: the reply ends by offering to do something and asking first:\n  " + quoted +
+                "\nWork mode auto is on: an internal, reversible step is yours to do now, then report it done. "
+                "Only a hard stop (outgoing message, payment, delete, permission, install, secret, production) "
+                "waits, and it goes on the pending list as a labeled item with your recommendation, not as a question.")
+    return ("AUTO GUARD：回覆結尾在問要不要做：\n  " + quoted +
+            "\nwork mode auto 開著：本機可回復的步驟直接做掉、回報已照辦。只有硬性停點（對外發送、金流、刪除、權限、安裝、憑證、正式環境）"
+            "才等他，而且寫成待處理清單裡帶標籤的項目加你的建議，不是問句。")
+
+
 def is_english(msg: str) -> bool:
     return any(ENGLISH_HEADING.match(ln) for ln in msg.splitlines())
 
@@ -211,9 +380,19 @@ def main():
         return
     bad = unlabeled(msg)
     weak = one_sided(msg)
-    if not bad and not weak:
+    modes = modes_on(data)
+    found = offers(msg) if "autonomous" in modes else []
+    again = reposted(msg, data) if "converge" in modes and not bad else []
+    if not bad and not weak and not found and not again:
         return
-    print(json.dumps({"decision": "block", "reason": reason(msg, bad, weak)}, ensure_ascii=False))
+    parts = []
+    if bad or weak:
+        parts.append(reason(msg, bad, weak))
+    if found:
+        parts.append(offer_reason(msg, found))
+    if again:
+        parts.append(repost_reason(msg, again))
+    print(json.dumps({"decision": "block", "reason": "\n".join(parts)}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
