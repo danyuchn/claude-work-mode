@@ -12,6 +12,7 @@ import {
   pickedArgs,
   pickerLabels,
   poolLine,
+  paceOf,
   reminderText,
   resetIn,
   switchReply,
@@ -491,7 +492,7 @@ test('C: stale and non-finite quota snapshots are excluded from routing', () => 
   expect(infinite).not.toContain('Infinity')
 })
 
-test('C: pool line prefers the open pool whose week resets first; the main model is noted, never preferred', () => {
+test('C: pool line prefers the open pool furthest behind its weekly pace; the main model ranks too', () => {
   const now = 1_000_000
   const h = 3600
   const rows = (extra: object[] = []) =>
@@ -502,16 +503,23 @@ test('C: pool line prefers the open pool whose week resets first; the main model
     ])
   const line = poolLine(rows(), now, DEFAULT_CONFIG_EN) ?? ''
   expect(line).toContain('[tempo: pools] agy 5h 8% 7d 45% (resets in 46h); codex 5h 16% 7d 9% (resets in 6d).')
-  expect(line).toContain('Spend agy first: its weekly window resets in 46h with 45% used')
+  // agy: 45% used with 73% of its week gone (pace -28); codex: 9% with 13% gone (-4)
+  expect(line).toContain('Spend agy first: 45% of its week used, -28 points against its pace (resets in 46h)')
   expect(line).not.toContain('main model')
-  // the main model's own week resets before agy's and has room: noted after the preference
+  // the main model furthest behind (30% used, 88% gone: -58) ranks first, worded as a subagent
   const withMain = poolLine(rows([{ pool: 'claude-sub', '7d_used': 30, '7d_reset_ts': now + 20 * h }]), now, DEFAULT_CONFIG_EN) ?? ''
-  expect(withMain).toContain('Spend agy first')
-  expect(withMain).toContain("The main model's own week resets in 20h at 30%")
-  // no room, or resetting later: not noted
-  expect(poolLine(rows([{ pool: 'claude-sub', '7d_used': 70, '7d_reset_ts': now + 20 * h }]), now, DEFAULT_CONFIG_EN)).not.toContain('main model')
-  expect(poolLine(rows([{ pool: 'claude-sub', '7d_used': 30, '7d_reset_ts': now + 80 * h }]), now, DEFAULT_CONFIG_EN)).not.toContain('main model')
-  // a pool past 85% of its week is not preferred even if it resets first
+  expect(withMain).not.toContain('Spend agy first')
+  expect(withMain).toContain("The main model's own week is furthest behind its pace (30% used, -58 points, resets in 20h)")
+  // closer to its pace than agy (70% used, 88% gone: -18): agy stays first
+  expect(poolLine(rows([{ pool: 'claude-sub', '7d_used': 70, '7d_reset_ts': now + 20 * h }]), now, DEFAULT_CONFIG_EN)).toContain('Spend agy first')
+  expect(paceOf({ used: 50, reset: now + 7 * 24 * h * 2 }, now)).toBe(50)
+  // a 5h window at the floor keeps the main model out of first place
+  expect(poolLine(rows([{ pool: 'claude-sub', '5h_used': 95, '7d_used': 30, '7d_reset_ts': now + 20 * h }]), now, DEFAULT_CONFIG_EN)).toContain('Spend agy first')
+  // a pool ai-quota would not rank (rankable false, error, reading over an hour old) is never first
+  for (const bad of [{ rankable: false }, { error: 'probe failed' }, { read_ts: now - 2 * h }])
+    expect(poolLine(rows([{ pool: 'claude-sub', '7d_used': 30, '7d_reset_ts': now + 20 * h, ...bad }]), now, DEFAULT_CONFIG_EN)).toContain('Spend agy first')
+  expect(poolLine(rows([{ pool: 'claude-sub', '7d_used': 30, '7d_reset_ts': now + 20 * h, read_ts: now - 60 }]), now, DEFAULT_CONFIG_EN)).toContain("main model's own week")
+  // a pool at the 90% floor is not preferred even when it is behind pace
   const spent = JSON.stringify([
     { pool: 'agy', gemini_5h_used: 8, gemini_7d_used: 90, gemini_7d_reset_ts: now + 10 * h, route: 'open' },
     { pool: 'codex', '5h_used': 16, '7d_used': 9, '7d_reset_ts': now + 146 * h, route: 'open' },
@@ -533,6 +541,16 @@ test('C: pool line prefers the open pool whose week resets first; the main model
   expect(resetIn(undefined, now)).toBe('?')
   expect(resetIn(now - 1, now)).toBe('now')
   expectNeutral([line, withMain])
+})
+
+test('C: a Claude subagent sent because Claude ranks first (why-claude: pace) counts as a dispatch', () => {
+  const cfg = { ...DEFAULT_CONFIG_EN, dispatch: { ...DEFAULT_CONFIG_EN.dispatch, subagentsDelegate: false } }
+  resetNudge()
+  observe('Agent', { prompt: 'why-claude: pace\nRead the folder.' }, 'ok', 100, cfg)
+  expect(observe('Read', {}, 'x'.repeat(500), 100, cfg)).toBe(undefined) // dispatched: no nudge
+  resetNudge()
+  observe('Agent', { prompt: 'why-claude: needs the Gmail MCP' }, 'ok', 100, cfg)
+  expect(observe('Read', {}, 'x'.repeat(500), 100, cfg)).toBeDefined() // any other reason is not a dispatch
 })
 
 test('C: with subagentsDelegate false an Agent call is refused until its prompt says why Claude; WebFetch counts and is gated', () => {

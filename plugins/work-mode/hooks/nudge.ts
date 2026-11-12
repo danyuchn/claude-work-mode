@@ -164,7 +164,9 @@ export function observe(
   const viaClaude = cfg.dispatch.subagentsDelegate
   if (subagent && viaClaude) return undefined
   const cmd = String((input as { command?: unknown } | null)?.command ?? '')
-  if ((viaClaude && (tool === 'Agent' || tool === 'Workflow')) || (tool === 'Bash' && isDispatch(shellParts(cmd).visible, cfg))) dispatched = true
+  // a Claude subagent sent because Claude ranks first by pace (`why-claude: pace`) is a dispatch too
+  const paced = tool === 'Agent' && /^pace\b/i.test((WHY_CLAUDE.exec(String((input as { prompt?: unknown } | null)?.prompt ?? ''))?.[1] ?? '').trim())
+  if ((viaClaude && (tool === 'Agent' || tool === 'Workflow')) || paced || (tool === 'Bash' && isDispatch(shellParts(cmd).visible, cfg))) dispatched = true
   if (tool === 'Read' || tool === 'Bash' || tool === 'Grep' || tool === 'WebFetch') chars += responseLength(response)
   if (!dispatched && !nudged && chars >= threshold) {
     nudged = true

@@ -151,15 +151,28 @@ export function resetIn(reset: number | undefined, now: number): string {
   return `${Math.floor(h / 24)}d`
 }
 
-const PREFER_BELOW = 85 // a pool past this much of its week is not worth preferring
-const CLAUDE_ROOM = 50 // the main model's week counts as roomy below this
+/** Seconds after which a pool reading is too old to name a pool first. */
+const STALE_READ = 3600
+const PREFER_BELOW = 90 // a pool at this much of its week is at the floor, never preferred
 const MAIN_POOL = 'claude-sub'
+const WEEK = 7 * 86400
+
+/**
+ * How far a weekly window runs behind its own clock: percent used minus percent of the week gone
+ * (the statusline's over-pace rule). The most negative pool is furthest behind, so its quota is
+ * the likeliest to expire unused.
+ */
+export function paceOf(w: { used: number; reset: number }, now: number): number {
+  const left = Math.max(0, Math.min(WEEK, w.reset - now))
+  return w.used - 100 * (1 - left / WEEK)
+}
 
 /**
  * One routing line from an optional quota table, so out does not keep sending work to a refused pool
- * and spends first the pool whose weekly window expires soonest.
+ * and spends first the pool furthest behind its weekly pace.
  * The table is a JSON array of rows `{pool: "agy"|"codex"|..., ...usage percents, route: "open"|"floor_5h"|"floor_7d", route_reset_ts}`;
- * a row named `claude-sub` is the main model's own quota and is never preferred, only noted.
+ * a row named `claude-sub` is the main model's own quota: it ranks with the rest (sent as a built-in
+ * subagent, worded by `claudeSoon`) and stays the last fallback.
  */
 export function poolLine(raw: string, now = Date.now() / 1000, cfg: WorkModeConfig = getConfig()): string | undefined {
   let rows: Array<Record<string, unknown>>
@@ -192,21 +205,24 @@ export function poolLine(raw: string, now = Date.now() / 1000, cfg: WorkModeConf
   const codexOut = blocked(c)
   const head = `[tempo: pools] agy ${win(a, 'gemini_5h_used', 'gemini_7d_used')}${agyOut ? ` (refused: ${agyOut})` : ''}; codex ${win(c, '5h_used', '7d_used')}${codexOut ? ` (refused: ${codexOut})` : ''}.`
   const tail = agyOut && codexOut ? routing.bothBlocked : agyOut ? routing.agyBlocked : codexOut ? routing.codexBlocked : routing.bothOpen
-  const fill = (t: string, pool: string, used: number, reset: number | undefined) =>
+  const fill = (t: string, pool: string, used: number, reset: number | undefined, pace: number) =>
     t.split('{pool}').join(pool).split('{used}').join(show(used)).split('{reset}').join(resetIn(reset, now))
-  // Which open external pool to spend first: the one whose week resets soonest and still has room.
+      .split('{pace}').join(`${pace > 0 ? '+' : ''}${Math.round(pace)}`)
+  // Dispatch order: open pools with a current weekly reading, furthest behind pace first.
   const open = rows
-    .filter(r => typeof r?.pool === 'string' && r.pool !== MAIN_POOL && !blocked(r))
+    // a 5h window at the floor blocks too: claude-sub carries no route of its own
+    .filter(r => typeof r?.pool === 'string' && !blocked(r) && !['5h_used', 'gemini_5h_used'].some(k => (num(r, k) ?? 0) >= PREFER_BELOW))
+    // ai-quota marks a pool it would not rank (error, old reading); an hour-old reading is a guess too
+    .filter(r => r.rankable !== false && r.error === undefined && (num(r, 'read_ts') === undefined || now - (num(r, 'read_ts') ?? now) <= STALE_READ))
     .map(r => ({ pool: String(r.pool), w: weekOf(r) }))
     .filter((x): x is { pool: string; w: { used: number; reset: number } } => x.w !== undefined && x.w.reset !== undefined && x.w.reset >= now && x.w.used < PREFER_BELOW)
-    .sort((x, y) => x.w.reset - y.w.reset || x.w.used - y.w.used)
+    .map(x => ({ ...x, pace: paceOf(x.w, now) }))
+    .sort((x, y) => x.pace - y.pace || x.w.reset - y.w.reset)
   const parts = [head, tail]
   const first = open[0]
   const stale = rows.some(r => r?.pool !== MAIN_POOL && (weekOf(r)?.reset ?? now) < now)
-  if (first && (open.length > 1 || stale)) parts.push(fill(routing.prefer, first.pool, first.w.used, first.w.reset))
-  const main = weekOf(row(MAIN_POOL))
-  if (main && main.reset !== undefined && main.reset >= now && main.used < CLAUDE_ROOM && (first === undefined || main.reset < first.w.reset))
-    parts.push(fill(routing.claudeSoon, MAIN_POOL, main.used, main.reset))
+  if (first && (open.length > 1 || stale))
+    parts.push(fill(first.pool === MAIN_POOL ? routing.claudeSoon : routing.prefer, first.pool, first.w.used, first.w.reset, first.pace))
   return parts.join(' ')
 }
 

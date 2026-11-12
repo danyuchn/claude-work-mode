@@ -113,8 +113,8 @@ export const DEFAULT_POOL_ROUTING: PoolRouting = {
   agyBlocked: 'agy is past the floor: send that batch work to codex or a background subagent instead.',
   codexBlocked: 'codex is past the floor: send code review and fixes to agy or a background subagent instead.',
   bothOpen: 'Both are open: route as above.',
-  prefer: 'Spend {pool} first: its weekly window resets in {reset} with {used} used, so what is left expires soonest.',
-  claudeSoon: "The main model's own week resets in {reset} at {used}: reading inline costs little right now, but verifiable batches still go out.",
+  prefer: 'Spend {pool} first: {used} of its week used, {pace} points against its pace (resets in {reset}), the furthest behind.',
+  claudeSoon: "The main model's own week is furthest behind its pace ({used} used, {pace} points, resets in {reset}): send this batch to a built-in subagent with `why-claude: pace` on the prompt's first line; it stays the last fallback for the others.",
 }
 
 let current: WorkModeConfig = DEFAULT_CONFIG_EN
