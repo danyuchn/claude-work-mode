@@ -89,7 +89,8 @@ export function convergeText(cfg: WorkModeConfig = getConfig()): string {
     `Decision items go in a "${c.sectionHeading}" section at the end of the reply.`,
     `Show a decision item only when it is new or its status changed, with your recommendation, ${reply}. Do not repost items already shown: end the reply with one line giving how many decisions are still open, and relist them in full only when asked or in the final report.`,
     `Start each decision item with one label: ${labels}. An item that fits none is yours to do now, not to ask (decision-label-guard blocks unlabeled items).`,
-    `[${c.tradeoffLabel}] is not a catch-all: use it only when two paths are both reasonable and the choice turns on ${w.poss} preference, and state what each option gains (${example}). If you cannot name a preference-based reason for each side, do your recommendation now instead of asking.`,
+    `[${c.tradeoffLabel}] is not a catch-all: use it only when two paths are both reasonable and the choice turns on ${w.poss} preference, and state what each option gains (${example}). If you cannot name a preference-based reason for each side, do your recommendation now instead of asking. Layout, naming, wording, file placement, scheduling of your own follow-ups and other internal presentation choices are never decision items: pick one and report it.`,
+    `Never start research, refactors, proposals, audits or scheduling ${w.subj} did not ask for; note such ideas as one-line follow-ups. Something new ${w.subj} raises while wrap is on is taken only if it can be finished in this session; otherwise record it as a todo and say so.`,
     close,
   ].join('\n')
 }
@@ -101,6 +102,7 @@ export function autonomousText(cfg: WorkModeConfig = getConfig()): string {
     `Do not stop to ask about internal, reversible decisions: local files, git commits on local branches, worktrees, tests, and merges or deploys ${w.subj} already authorized. Decide, record the choice in your reply, and continue.`,
     `A process or quality gate that denies a call in this mode says how to proceed: follow that text and retry, do not wait for ${w.obj}.`,
     'Hard stops are never done on your own: outgoing messages (mail, chat, social posts), installing packages or cloning, anything touching credentials or secrets, deleting data that cannot be recovered, payments, permission changes, and production changes to config, rules or permissions or that delete production data. Put each one on a pending list and keep working on everything else.',
+    'A background job (external CLI, subagent, review) is never a reason to end the turn: keep working on the other open items, and when its result arrives, verify it and continue on your own. A pool or quota that is blocked means fall back to the next route, not wait for a reset.',
     ...cfg.autonomous.extraRules,
     `Even when ${w.subj} already approved one of them (e.g. "send it when done"), or any other call will raise a confirmation prompt (hook ask, built-in rm check), run it last: finish every other step first (uploads, file writes, doc updates, commits), then run all prompting calls back to back, so ${w.subj} ${w.is} interrupted once, not mid-work.`,
     `Report the pending list once, at the end of the work, each item with your recommendation, in ${plain(cfg)}.`,

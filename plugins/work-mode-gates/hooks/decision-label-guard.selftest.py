@@ -144,6 +144,9 @@ OFFERS = [
     ("en labeled passes", "## Decisions Needed\n- [outbound] Should I send the reply to the client? I recommend yes.\n", 0),
     ("en statement passes", "All done; the three files are committed.\n", 0),
     ("quoted user words pass", "> 要不要我幫你訂？\n上面是他原話，我已照辦。\n", 0),
+    ("zh say-the-word offer blocks", "已套品牌色。要的話回一聲，我就移。\n", 1),
+    ("zh nod offer blocks", "草稿備好了，你點頭我就改進主檔。\n", 1),
+    ("en say-the-word offer blocks", "The patch is ready. Just say so and I'll apply it.\n", 1),
 ]
 with tempfile.TemporaryDirectory() as d:
     env = {"TEMPO_STATE_DIR": d}
@@ -162,6 +165,51 @@ with tempfile.TemporaryDirectory() as d:
     check("auto reason says to do it", "AUTO GUARD" in r.stdout and ("Dus" + "tin") not in r.stdout)
     r = run(OFFERS[8][1], env, session_id="sid-auto")
     check("auto en reason is English", "AUTO GUARD: the reply ends" in json.loads(r.stdout or "{}").get("reason", ""))
+
+# wrap guard: a decisions section whose items were all shown before is blocked
+def transcript(path, *replies, user="繼續"):
+    with open(path, "w", encoding="utf-8") as f:
+        for r in replies:
+            f.write(json.dumps({"type": "user", "message": {"role": "user", "content": user}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": r}]}}) + "\n")
+
+
+A = "做好了。\n\n**待你決定**\n1. [對外] 要不要把草稿寄給客戶？建議寄。\n2. [金流] 退款 300 元？建議退。\n"
+B = "又做了一些。\n\n**待你決定**\n1. [對外] 要不要把草稿寄給客戶？建議寄。\n2. [金流] 退款 300 元？建議退。\n"
+C = "又做了一些。\n\n**待你決定**\n1. [對外] 要不要把草稿寄給客戶？建議寄。\n2. [刪除] 清掉舊備份？建議清。\n"
+D = "最終回報。\n\n**待你決定**\n1. [對外] 要不要把草稿寄給客戶？建議寄。\n2. [金流] 退款 300 元？建議退。\n"
+E = "都做完了。還有 2 項待決。\n"
+with tempfile.TemporaryDirectory() as d:
+    env = {"TEMPO_STATE_DIR": d}
+    with open(os.path.join(d, "sid-wrap"), "w") as f:
+        json.dump({"modes": ["converge"]}, f)
+    with open(os.path.join(d, "sid-auto"), "w") as f:
+        json.dump({"modes": ["autonomous"]}, f)
+    tp = os.path.join(d, "t.jsonl")
+    transcript(tp, A)
+    r = run(B, env, session_id="sid-wrap", transcript_path=tp)
+    check("wrap repost blocks", "WRAP GUARD" in r.stdout, r.stdout[:60])
+    transcript(tp, A, B)  # the transcript already holds the reply being judged
+    r = run(B, env, session_id="sid-wrap", transcript_path=tp)
+    check("wrap repost blocks when transcript holds the reply", "WRAP GUARD" in r.stdout)
+    transcript(tp, A)
+    r = run(C, env, session_id="sid-wrap", transcript_path=tp)
+    check("wrap one new item passes", r.stdout.strip() == "", r.stdout[:60])
+    r = run(D, env, session_id="sid-wrap", transcript_path=tp)
+    check("wrap final report passes", r.stdout.strip() == "")
+    r = run(E, env, session_id="sid-wrap", transcript_path=tp)
+    check("wrap open-count line passes", r.stdout.strip() == "")
+    transcript(tp, A, user="把待你決定的全部列出來")
+    r = run(B, env, session_id="sid-wrap", transcript_path=tp)
+    check("wrap relist on request passes", r.stdout.strip() == "")
+    transcript(tp, A)
+    r = run(B, env, session_id="sid-auto", transcript_path=tp)
+    check("wrap guard is silent without wrap", r.stdout.strip() == "")
+    r = run(A, env, session_id="sid-wrap", transcript_path=tp.replace(".jsonl", ".missing.jsonl"))
+    check("wrap guard fails open without a transcript", r.stdout.strip() == "")
+    transcript(tp, "早安。\n")
+    r = run(A, env, session_id="sid-wrap", transcript_path=tp)
+    check("wrap first showing passes", r.stdout.strip() == "")
 
 # custom labels and heading from a config file
 with tempfile.TemporaryDirectory() as d:

@@ -15,7 +15,9 @@ import type { WorkModeConfig } from './tempo'
 //    dispatch.corpusPattern (transcripts, dumps) is refused on its first read, before any count.
 // With dispatch.subagentsDelegate false, Claude subagents spend the same quota: their reads
 // count too, spawning one is not delegating, and a nudge they trip waits for the main thread.
-// The gate itself never fires inside a subagent: the main thread chose to spawn it.
+// The gate itself never fires inside a subagent: the main thread chose to spawn it. With
+// subagentsDelegate false an Agent call is refused too, unless its prompt opens with
+// `why-claude: <reason>`: the one line that says why the job needs Claude rather than a cheaper pool.
 
 let chars = 0
 let dispatched = false
@@ -29,6 +31,17 @@ export function resetNudge(): void {
   nudged = false
   declared = undefined
   due = undefined
+}
+
+/** `why-claude: <reason>` at the top of an Agent prompt says why this job needs a Claude subagent. */
+export const WHY_CLAUDE = /^\s*(?:<[^>]*>\s*)?why-claude:\s*([^\n]*)/i
+
+/** The refusal of an Agent call under out when subagents spend the main quota (dispatch.subagentsDelegate false). */
+export function agentText(cfg: WorkModeConfig = getConfig()): string {
+  const hint = cfg.dispatch.pickerHint
+  return cfg.locale === 'zh-TW'
+    ? `[dispatch-gate] out 模式：Claude 子代理花的是同一份週額度。這件事如果是讀取、抽取、分類、摘要、核對這類能驗收的批次工作，改交外部 CLI（${hint}）。真的需要 Claude（要改檔、要 MCP 或憑證、要判斷力、接續主線已讀的脈絡），在 prompt 第一行寫 \`why-claude: <一句理由>\` 再派一次就放行，理由會記錄。`
+    : `[dispatch-gate] out is on: a Claude subagent spends the same weekly quota as this thread. If this job is reading, extraction, classification, summarising or checking that a spot check can verify, send it to an external CLI (${hint}) instead. If it really needs Claude (edits, MCP or credentials, judgement, context already read here), put \`why-claude: <one-line reason>\` on the first line of the prompt and call again; it then passes and the reason is logged.`
 }
 
 export function responseLength(v: unknown): number {
@@ -106,7 +119,7 @@ export function observe(
   if (subagent && viaClaude) return undefined
   const cmd = String((input as { command?: unknown } | null)?.command ?? '')
   if ((viaClaude && (tool === 'Agent' || tool === 'Workflow')) || dispatchPattern(cfg).test(cmd)) dispatched = true
-  if (tool === 'Read' || tool === 'Bash' || tool === 'Grep') chars += responseLength(response)
+  if (tool === 'Read' || tool === 'Bash' || tool === 'Grep' || tool === 'WebFetch') chars += responseLength(response)
   if (!dispatched && !nudged && chars >= threshold) {
     nudged = true
     return nudgeText(chars, cfg)
@@ -137,10 +150,15 @@ export function gate(
     }
     if (dispatchPattern(cfg).test(cmd)) return undefined
   }
+  if (tool === 'Agent' && !cfg.dispatch.subagentsDelegate) {
+    const m = WHY_CLAUDE.exec(String(inp.prompt ?? ''))
+    if (m) return { declared: `why-claude: ${(m[1] ?? '').trim() || '(no reason given)'}` }
+    return { deny: agentText(cfg) }
+  }
   if (declared !== undefined || dispatched) return undefined
-  const reads = tool === 'Read' || tool === 'Grep' || (tool === 'Bash' && READER.test(cmd))
+  const reads = tool === 'Read' || tool === 'Grep' || tool === 'WebFetch' || (tool === 'Bash' && READER.test(cmd))
   if (!reads) return undefined
-  const target = tool === 'Bash' ? cmd : String(inp.file_path ?? inp.path ?? '')
+  const target = tool === 'Bash' ? cmd : String(inp.file_path ?? inp.path ?? inp.url ?? '')
   const c = corpusPattern(cfg)
   if (c && target && c.test(target)) {
     const hit = tool === 'Bash' ? (cmd.match(/\S*(?:\.jsonl|transcript\S*|\S+)/)?.[0] ?? cmd).slice(0, 80) : target
@@ -171,7 +189,7 @@ async function logInline($: EngineInterface, reason: string, tool: string): Prom
 export function registerNudge(on: On): void {
   // The read gate: only the main thread (tool.call carries agentId; classic.PreToolUse does not), only with out on.
   // Matched on the reader tools, so a host mod with its own unmatched tool.call hook can still load this module.
-  on('tool.call', { tool: /^(?:Read|Grep|Bash)$/ }, async ($, e, next) => {
+  on('tool.call', { tool: /^(?:Read|Grep|Bash|WebFetch|Agent)$/ }, async ($, e, next) => {
     if (e.agentId || !(await dispatchOn($))) return next(e)
     const cfg = await ensureConfig($)
     const raw = Number(await $.env.get('DISPATCH_NUDGE_CHARS'))

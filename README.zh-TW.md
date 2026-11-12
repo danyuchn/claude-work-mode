@@ -21,7 +21,7 @@
 : # work-mode: inline 接下來就要改這個檔
 ```
 
-宣告之後這回合的讀取都放行，理由會記到 `~/.claude/state/tempo-inline/<session_id>.jsonl`，下次檢討時看得到。符合 `dispatch.corpusPattern` 的路徑（對話紀錄、逐字稿、傾印檔）第一次讀就擋，不等門檻。子代理不受閘門限制。`dispatch.readGate: false` 可以關掉閘門、只留提醒。
+宣告之後這回合的讀取都放行，理由會記到 `~/.claude/state/tempo-inline/<session_id>.jsonl`，下次檢討時看得到。`WebFetch` 也算讀取。`subagentsDelegate: false` 時，派 Agent 一樣會被擋，直到 prompt 第一行寫 `why-claude: <理由>`（要改檔、要 MCP 或憑證、要判斷力、接續主線已讀的脈絡）；理由同樣記錄。符合 `dispatch.corpusPattern` 的路徑（對話紀錄、逐字稿、傾印檔）第一次讀就擋，不等門檻。子代理不受閘門限制。`dispatch.readGate: false` 可以關掉閘門、只留提醒。
 
 ## 示範影片（60 秒快速導覽）
 
@@ -52,7 +52,7 @@
 | --- | --- | --- | --- |
 | `scratch-doc-guard.sh` | PreToolUse `Write` | 新建 `SUMMARY*/REPORT*/NOTES*/FINDINGS*/ANALYSIS*.md` 前先問 | 拒絕：改寫進既有文件、放暫存資料夾，或直接寫在回覆裡 |
 | `git-safe-commit-gate.sh` | PreToolUse `Bash` | `git commit` 帶路徑（不論有沒有 `--`），或 `git add <檔>...` 而某檔原本就有未 stage 的修改時先問 | 拒絕：改用 `git add -p`，再用不帶路徑的 `git commit` |
-| `decision-label-guard.py` | Stop | 回覆的待決區塊裡有沒標類別的項目，或「取捨」項目沒講兩邊各自得失，就擋下 | 另外也擋回覆結尾「要我先…嗎？」這種先問再做的句子：開 `auto` 時本機步驟直接做，硬性停點寫成帶標籤的待決項目 |
+| `decision-label-guard.py` | Stop | 回覆的待決區塊裡有沒標類別的項目，或「取捨」項目沒講兩邊各自得失，就擋下 | 開 `auto` 時也擋回覆結尾「要我先…嗎？」「要的話回一聲我就…」這種先問再做的句子：本機步驟直接做，硬性停點寫成帶標籤的待決項目。開 `wrap` 時也擋「待你決定」每一項都在前六則回覆裡原樣列過的回覆（從對話紀錄尾端比對），最終回報或他要求重列時除外 |
 
 自己寫的閘門也可以引用 `tempo-auto.sh`。真正的硬停（憑證、force push、部署）不要接它，任何模式下都該問。
 

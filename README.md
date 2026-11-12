@@ -21,7 +21,7 @@ A reminder alone is easy to read past, so `out` also changes the default. Once t
 : # work-mode: inline the file is being edited next
 ```
 
-Reads then pass for the rest of the turn, and the reason is appended to `~/.claude/state/tempo-inline/<session_id>.jsonl` for the next review. Paths matching `dispatch.corpusPattern` (transcripts, dumps, logs) are refused on their first read, before any count. Subagents are never gated. `dispatch.readGate: false` turns the gate off and keeps the nudge.
+Reads then pass for the rest of the turn, and the reason is appended to `~/.claude/state/tempo-inline/<session_id>.jsonl` for the next review. `WebFetch` counts as reading too. With `subagentsDelegate: false`, an Agent call is refused the same way until the prompt opens with `why-claude: <reason>` (edits, MCP or credentials, judgement, context already read here); the reason is logged. Paths matching `dispatch.corpusPattern` (transcripts, dumps, logs) are refused on their first read, before any count. Subagents are never gated. `dispatch.readGate: false` turns the gate off and keeps the nudge.
 
 ## Demo (60s Walkthrough)
 
@@ -52,7 +52,7 @@ The modes are written to `~/.claude/state/tempo/<session_id>` so shell hooks can
 | --- | --- | --- | --- |
 | `scratch-doc-guard.sh` | PreToolUse `Write` | asks before creating a new `SUMMARY*/REPORT*/NOTES*/FINDINGS*/ANALYSIS*.md` | denies: update the existing doc, use a scratch dir, or answer in the reply |
 | `git-safe-commit-gate.sh` | PreToolUse `Bash` | asks on `git commit` with paths (with or without `--`) and on `git add <file>...` when a file already had unstaged edits | denies: use `git add -p`, then a plain `git commit` |
-| `decision-label-guard.py` | Stop | blocks a reply whose decisions section holds an unlabeled item, or a tradeoff item that does not state what each side gains | also blocks a reply whose closing lines offer to do something and ask first ("Shall I go ahead and...?"): under `auto` an internal step is done, a hard stop goes on the pending list as a labeled item |
+| `decision-label-guard.py` | Stop | blocks a reply whose decisions section holds an unlabeled item, or a tradeoff item that does not state what each side gains | under `auto`, also blocks a reply whose closing lines offer to do something and ask first ("Shall I go ahead and...?", "say the word and I'll..."): an internal step is done, a hard stop goes on the pending list as a labeled item. Under `wrap`, also blocks a decisions section whose every item was already shown unchanged in one of the last six replies (read from the transcript tail), except in a final report or when asked to relist |
 
 Use `tempo-auto.sh` in your own gates for anything you want converted. Keep real hard stops (secrets, force pushes, deploys) out of it: they should ask in every mode.
 

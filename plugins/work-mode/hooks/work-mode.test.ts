@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { DEFAULT_CONFIG_EN, DEFAULT_CONFIG_ZH, localeFrom, resolveConfig, resolvePath } from './config'
-import { gate, gateText, nudgeText, observe, resetNudge, responseLength } from './nudge'
+import { agentText, gate, gateText, nudgeText, observe, resetNudge, responseLength } from './nudge'
 import {
   autonomousText,
   comboText,
@@ -504,4 +504,19 @@ test('C: pool line prefers the open pool whose week resets first; the main model
   expect(resetIn(undefined, now)).toBe('?')
   expect(resetIn(now - 1, now)).toBe('now')
   expectNeutral([line, withMain])
+})
+
+test('C: with subagentsDelegate false an Agent call is refused until its prompt says why Claude; WebFetch counts and is gated', () => {
+  const cfg = { ...DEFAULT_CONFIG_EN, dispatch: { ...DEFAULT_CONFIG_EN.dispatch, subagentsDelegate: false } }
+  resetNudge()
+  expect(gate('Agent', { prompt: 'read all transcripts and list corrections' }, 100, cfg)).toEqual({ deny: agentText(cfg) })
+  expect(gate('Agent', { prompt: 'why-claude: it edits five files in this repo\nDo the refactor.' }, 100, cfg)).toEqual({ declared: 'why-claude: it edits five files in this repo' })
+  expect(gate('Agent', { prompt: '<task>\nwhy-claude: needs the Gmail MCP\n...' }, 100, cfg)?.toString()).toBeDefined()
+  expect(gate('Agent', { prompt: 'x' }, 100, DEFAULT_CONFIG_EN)).toBe(undefined) // subagents delegate by default: no gate
+  expect(agentText(DEFAULT_CONFIG_ZH)).toContain('why-claude')
+  expectNeutral([agentText(DEFAULT_CONFIG_EN)])
+  resetNudge()
+  observe('WebFetch', { url: 'https://x' }, 'y'.repeat(150), 100, cfg)
+  expect(denyOf(gate('WebFetch', { url: 'https://x/2' }, 100, cfg))).toContain('[dispatch-gate]')
+  expect(gate('Read', { file_path: '/a' }, 100, cfg)).toBeDefined()
 })
