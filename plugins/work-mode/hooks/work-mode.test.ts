@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { DEFAULT_CONFIG_EN, DEFAULT_CONFIG_ZH, localeFrom, resolveConfig, resolvePath } from './config'
-import { nudgeText, observe, resetNudge, responseLength } from './nudge'
+import { gate, gateText, nudgeText, observe, resetNudge, responseLength } from './nudge'
 import {
   autonomousText,
   comboText,
@@ -12,6 +12,8 @@ import {
   pickedArgs,
   pickerLabels,
   poolLine,
+  reminderText,
+  resetIn,
   switchReply,
   switchTexts,
   tempoLabel,
@@ -50,8 +52,10 @@ function world(on: On, w: World = {}) {
   })
   on('classic.UserPromptSubmit', () => ({}) as never)
   on('classic.PostToolUse', () => ({}))
+  on('tool.call', () => ({ result: 'ok', text: 'ok' }) as never)
 }
 
+const denyOf = (v: unknown) => (v as { deny?: string } | undefined)?.deny
 const start = ($: any) => $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 const run = (args: string) => ({
   command: 'work-mode',
@@ -380,4 +384,124 @@ test('out + wrap: combo text is sent once, only when both are on', () => {
   expect(switchTexts([], ['converge'], false, undefined, cfg).some(x => x.startsWith(tag))).toBe(false)
   expect(comboText({ ...cfg, converge: { ...cfg.converge, autoCloseCommand: '/checkpoint' } })).toContain('/checkpoint waits for it')
   expect(switchReply(['dispatch', 'converge'], undefined, cfg)).toContain('only finishes work already open')
+})
+
+// ---- group C: the read gate, the reminder, reset-aware pools ------------------------------
+
+test('C: gate verdicts: threshold, corpus, inline declaration, delegation, readers only', () => {
+  const cfg = { ...DEFAULT_CONFIG_EN, dispatch: { ...DEFAULT_CONFIG_EN.dispatch, corpusPattern: '\\.jsonl$|/transcripts/' } }
+  resetNudge()
+  expect(gate('Read', { file_path: '/a/code.ts' }, 100, cfg)).toBe(undefined)
+  expect(gate('Read', { file_path: '/a/session.jsonl' }, 100, cfg)).toEqual({ deny: gateText(0, '/a/session.jsonl', cfg) })
+  expect(denyOf(gate('Bash', { command: 'cat /a/transcripts/x.md | head' }, 100, cfg))).toContain('[dispatch-gate]')
+  expect(gate('Bash', { command: 'ls /a/transcripts/' }, 100, cfg)).toBe(undefined) // ls is not a reader
+  observe('Read', {}, 'x'.repeat(150), 100, cfg)
+  expect(gate('Read', { file_path: '/a/code.ts' }, 100, cfg)).toEqual({ deny: gateText(150, undefined, cfg) })
+  expect(denyOf(gate('Grep', { pattern: 'x', path: '/a' }, 100, cfg))).toContain('150 characters')
+  expect(denyOf(gate('Bash', { command: 'sed -n 1,50p /a/code.ts' }, 100, cfg))).toBeDefined()
+  expect(gate('Edit', { file_path: '/a/code.ts' }, 100, cfg)).toBe(undefined)
+  expect(gate('Bash', { command: 'git status' }, 100, cfg)).toBe(undefined)
+  expect(gate('Bash', { command: 'codex exec review' }, 100, cfg)).toBe(undefined) // delegating passes
+  expect(gate('Bash', { command: ': # work-mode: inline editing this file next' }, 100, cfg)).toEqual({ declared: 'editing this file next' })
+  expect(gate('Read', { file_path: '/a/session.jsonl' }, 100, cfg)).toBe(undefined) // declared: everything passes this turn
+  resetNudge()
+  observe('Read', {}, 'x'.repeat(150), 100, cfg)
+  expect(denyOf(gate('Read', { file_path: '/a/code.ts' }, 100, cfg))).toBeDefined()
+  observe('Bash', { command: 'gemini -p "x" ' }, 'a', 100, cfg)
+  expect(gate('Read', { file_path: '/a/code.ts' }, 100, cfg)).toBe(undefined) // delegated earlier this turn
+  resetNudge()
+  observe('Read', {}, 'x'.repeat(150), 100, cfg)
+  expect(gate('Read', { file_path: '/a/code.ts' }, 100, { ...cfg, dispatch: { ...cfg.dispatch, readGate: false } })).toBe(undefined)
+  expect(gateText(5, undefined, DEFAULT_CONFIG_ZH)).toContain('work-mode: inline')
+  const tpl = { ...cfg, dispatch: { ...cfg.dispatch, gateTemplate: 'STOP {chars} via {hint}' } }
+  expect(gateText(7, undefined, tpl)).toBe('STOP 7 via subagents / external CLI')
+  expectNeutral([gateText(5, undefined, DEFAULT_CONFIG_EN), gateText(5, '/x.jsonl', DEFAULT_CONFIG_EN)])
+})
+
+test('C: the gate denies with out on, lifts on a declaration, stays off otherwise', async ($, on) => {
+  world(on)
+  await start($)
+  await $.classic.UserPromptSubmit({ prompt: 'go', session_id: 'sid-1' } as never)
+  const read = (extra: object = {}) => $.tool.call({ tool: 'Read', file_path: '/a/b.md', ...extra } as never)
+  const post = (n: number, extra: object = {}) =>
+    $.classic.PostToolUse({ tool_name: 'Read', tool_input: {}, tool_response: 'x'.repeat(n), tool_use_id: 't', ...extra } as never)
+  await post(50000)
+  expect((await read()).text).toBe('ok') // off: no gate
+  await $.command.run(run('out'))
+  await $.classic.UserPromptSubmit({ prompt: 'go', session_id: 'sid-1' } as never)
+  expect((await read()).text).toBe('ok')
+  await post(25000)
+  const denied = await read()
+  expect(JSON.stringify(denied)).toContain('[dispatch-gate]')
+  await $.tool.call({ tool: 'Bash', command: ': # work-mode: inline nearly done' } as never)
+  expect((await read()).text).toBe('ok')
+  expect(written['/home/u/.claude/state/tempo-inline/sid-1.jsonl']).toContain('"reason":"nearly done"')
+  await $.classic.UserPromptSubmit({ prompt: 'next', session_id: 'sid-1' } as never)
+  await post(25000)
+  expect(JSON.stringify(await read())).toContain('[dispatch-gate]')
+  await $.command.run(run('off'))
+  expect((await read()).text).toBe('ok')
+})
+
+test('C: a one-line reminder every N prompts, counted from the last full text', async ($, on) => {
+  world(on, { files: { [CFG_PATH]: JSON.stringify({ reminderEveryTurns: 3 }) } })
+  await start($)
+  await $.command.run(run('auto wrap'))
+  const prompt = async () => (await $.classic.UserPromptSubmit({ prompt: 'go', session_id: 'sid-1' } as never)).additionalContext ?? []
+  const first = await prompt() // the switch texts rode with the first tool result; this prompt counts 1
+  expect(first.some(t => t.startsWith('[tempo] still on'))).toBe(false)
+  expect((await prompt()).length).toBe(0)
+  const third = await prompt()
+  expect(third.length).toBe(1)
+  expect(third[0]).toBe(reminderText(['autonomous', 'converge']))
+  expect(third[0]).toContain('auto + wrap')
+  expect(third[0]).toContain('Decisions Needed')
+  expect((await prompt()).length).toBe(0)
+  expectNeutral(third)
+  expect(resolveConfig({ reminderEveryTurns: 0 }).reminderEveryTurns).toBe(0)
+  expect(resolveConfig({ reminderEveryTurns: 'x' }).reminderEveryTurns).toBe(8)
+})
+
+test('C: pool line prefers the open pool whose week resets first; the main model is noted, never preferred', () => {
+  const now = 1_000_000
+  const h = 3600
+  const rows = (extra: object[] = []) =>
+    JSON.stringify([
+      { pool: 'agy', gemini_5h_used: 8, gemini_7d_used: 45, gemini_7d_reset_ts: now + 46 * h, route: 'open' },
+      { pool: 'codex', '5h_used': 16, '7d_used': 9, '7d_reset_ts': now + 146 * h, route: 'open' },
+      ...extra,
+    ])
+  const line = poolLine(rows(), now, DEFAULT_CONFIG_EN) ?? ''
+  expect(line).toContain('[tempo: pools] agy 5h 8% 7d 45% (resets in 46h); codex 5h 16% 7d 9% (resets in 6d).')
+  expect(line).toContain('Spend agy first: its weekly window resets in 46h with 45% used')
+  expect(line).not.toContain('main model')
+  // the main model's own week resets before agy's and has room: noted after the preference
+  const withMain = poolLine(rows([{ pool: 'claude-sub', '7d_used': 30, '7d_reset_ts': now + 20 * h }]), now, DEFAULT_CONFIG_EN) ?? ''
+  expect(withMain).toContain('Spend agy first')
+  expect(withMain).toContain("The main model's own week resets in 20h at 30%")
+  // no room, or resetting later: not noted
+  expect(poolLine(rows([{ pool: 'claude-sub', '7d_used': 70, '7d_reset_ts': now + 20 * h }]), now, DEFAULT_CONFIG_EN)).not.toContain('main model')
+  expect(poolLine(rows([{ pool: 'claude-sub', '7d_used': 30, '7d_reset_ts': now + 80 * h }]), now, DEFAULT_CONFIG_EN)).not.toContain('main model')
+  // a pool past 85% of its week is not preferred even if it resets first
+  const spent = JSON.stringify([
+    { pool: 'agy', gemini_5h_used: 8, gemini_7d_used: 90, gemini_7d_reset_ts: now + 10 * h, route: 'open' },
+    { pool: 'codex', '5h_used': 16, '7d_used': 9, '7d_reset_ts': now + 146 * h, route: 'open' },
+    { pool: 'grok', period_used: 19, period_reset_ts: now + 125 * h },
+  ])
+  expect(poolLine(spent, now, DEFAULT_CONFIG_EN)).toContain('Spend grok first')
+  // a refused pool is never preferred; custom wording reaches the line
+  const refused = JSON.stringify([
+    { pool: 'agy', gemini_5h_used: 8, gemini_7d_used: 45, gemini_7d_reset_ts: now + 46 * h, route: 'floor_5h', route_used: 95, route_reset_ts: now + h, route_reset_in: '1h' },
+    { pool: 'codex', '5h_used': 16, '7d_used': 9, '7d_reset_ts': now + 146 * h, route: 'open' },
+    { pool: 'claude-sub', '7d_used': 10, '7d_reset_ts': now + 5 * h },
+  ])
+  const custom = { ...DEFAULT_CONFIG_EN, dispatch: { ...DEFAULT_CONFIG_EN.dispatch, poolRouting: { bothBlocked: 'BB', agyBlocked: 'AB', codexBlocked: 'CB', bothOpen: 'BO', prefer: 'PREFER {pool} {used} {reset}', claudeSoon: 'MAIN {reset} {used}' } } }
+  const r = poolLine(refused, now, custom) ?? ''
+  expect(r).toContain('(resets in 46h) (refused: 5h window 95%, resets in 1h); codex')
+  expect(r).toContain('(resets in 6d). AB MAIN')
+  expect(r).not.toContain('PREFER') // only one open pool: nothing to prefer between
+  expect(r).toContain('MAIN 5h 10%')
+  expect(resetIn(undefined, now)).toBe('?')
+  expect(resetIn(now - 1, now)).toBe('now')
+  expectNeutral([line, withMain])
 })

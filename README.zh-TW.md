@@ -7,11 +7,21 @@
 | 模式 | 模型會被告知什麼 |
 | --- | --- |
 | `auto` | 本機、可回復的步驟（改檔、本地 commit、跑測試）不中途停下來問。真正要你點頭的事（對外發訊、安裝套件、碰憑證、刪掉救不回的資料、金流、改權限、動正式環境）記進待決清單，做完一次回報；會跳確認視窗的指令留到最後一口氣跑完，你只被打斷一次。 |
-| `out` | 能用檢查器或抽查驗收的批次工作（抽取、分類、摘要、審查）派給背景子代理或外部 CLI，主線只驗收。主線一個回合讀進大量原始內容卻沒外派時，會提醒一次。 |
+| `out` | 能用檢查器或抽查驗收的批次工作（抽取、分類、摘要、審查）派給背景子代理或外部 CLI，主線只驗收。主線一個回合讀進大量原始內容卻沒外派時，會提醒一次；之後再讀就會被擋下，直到模型外派、或用一行話宣告為什麼要繼續在主線讀（見下方「讀取閘門」）。 |
 | `wrap` | 收斂：不開新方向，把手上的做完；只列新增或狀態有變的待決事項，每項帶類別標籤與建議。 |
 | `off` | 回到平常。 |
 
-模式只對當前 session 有效，可以任意組合（`/work-mode auto wrap`）；`out wrap` 一起開時，外派只用來把手上的工作做完、不派新方向；派出去的工作要等結果回來並驗收完才算收尾。只打 `/work-mode` 會跳出可複選的選單。模式說明只送給模型一次（跟著下一個工具結果或下一則訊息），壓縮或 resume 之後才再送，不會每回合都塞進上下文。
+模式只對當前 session 有效，可以任意組合（`/work-mode auto wrap`）；`out wrap` 一起開時，外派只用來把手上的工作做完、不派新方向；派出去的工作要等結果回來並驗收完才算收尾。只打 `/work-mode` 會跳出可複選的選單。模式說明只送給模型一次（跟著下一個工具結果或下一則訊息），壓縮或 resume 之後才再送，不會每回合都塞進上下文；每八則訊息會跟著一行提醒（`reminderEveryTurns`），長對話才不會漸漸忘掉模式。
+
+### 讀取閘門（`out`）
+
+只靠提醒很容易被讀過就忘，所以 `out` 也改了預設行為。主線在一個回合裡讀進 `nudgeThresholdChars` 字元的原始內容、又什麼都沒外派之後，下一個 `Read`、`Grep` 或讀檔用的 `Bash`（`cat`、`sed`、`jq`、`grep`…）會被拒絕並附上做法。模型要嘛外派（符合 `commandPattern` 的指令，或在 `subagentsDelegate` 開著時派 Agent），要嘛跑一個空指令宣告為什麼要在主線讀：
+
+```
+: # work-mode: inline 接下來就要改這個檔
+```
+
+宣告之後這回合的讀取都放行，理由會記到 `~/.claude/state/tempo-inline/<session_id>.jsonl`，下次檢討時看得到。符合 `dispatch.corpusPattern` 的路徑（對話紀錄、逐字稿、傾印檔）第一次讀就擋，不等門檻。子代理不受閘門限制。`dispatch.readGate: false` 可以關掉閘門、只留提醒。
 
 ## 示範影片（60 秒快速導覽）
 
@@ -42,7 +52,7 @@
 | --- | --- | --- | --- |
 | `scratch-doc-guard.sh` | PreToolUse `Write` | 新建 `SUMMARY*/REPORT*/NOTES*/FINDINGS*/ANALYSIS*.md` 前先問 | 拒絕：改寫進既有文件、放暫存資料夾，或直接寫在回覆裡 |
 | `git-safe-commit-gate.sh` | PreToolUse `Bash` | `git commit` 帶路徑（不論有沒有 `--`），或 `git add <檔>...` 而某檔原本就有未 stage 的修改時先問 | 拒絕：改用 `git add -p`，再用不帶路徑的 `git commit` |
-| `decision-label-guard.py` | Stop | 回覆的待決區塊裡有沒標類別的項目，或「取捨」項目沒講兩邊各自得失，就擋下 | 相同 |
+| `decision-label-guard.py` | Stop | 回覆的待決區塊裡有沒標類別的項目，或「取捨」項目沒講兩邊各自得失，就擋下 | 另外也擋回覆結尾「要我先…嗎？」這種先問再做的句子：開 `auto` 時本機步驟直接做，硬性停點寫成帶標籤的待決項目 |
 
 自己寫的閘門也可以引用 `tempo-auto.sh`。真正的硬停（憑證、force push、部署）不要接它，任何模式下都該問。
 
@@ -63,6 +73,10 @@
 | `dispatch.nudgeThresholdChars` | `20000` | 讀進多少字元才提醒（環境變數 `DISPATCH_NUDGE_CHARS` 可覆寫） |
 | `dispatch.subagentsDelegate` | `true` | 設 `false` 時 Claude 子代理算同一份額度：開子代理不算外派，子代理讀進的內容也算進提醒門檻（提醒只給主線） |
 | `dispatch.nudgeTemplate` | 內建 | 提醒文字，`{chars}` 會換成字元數 |
+| `dispatch.readGate` | `true` | 過了提醒門檻之後擋下讀取，直到模型外派或宣告為什麼要繼續讀 |
+| `dispatch.corpusPattern` | 無 | 符合這個正規式的路徑是整批原始材料：開 `out` 時第一次讀就擋 |
+| `dispatch.gateTemplate` | 內建 | 閘門的拒絕文字，`{chars}`、`{hint}` 會換掉 |
+| `reminderEveryTurns` | `8` | 模式開著時每 N 則訊息送一行提醒；`0` 關掉 |
 | `dispatch.quotaFile`／`poolRouting` | 無 | 選用的額度表（見下） |
 | `converge.sectionHeading` | `待你決定`／`Decisions Needed` | 待決區塊標題 |
 | `converge.decisionLabels`／`tradeoffLabel` | `對外 金流 刪除 權限 取捨` | 每個待決項目開頭必須帶的標籤 |
@@ -73,6 +87,8 @@
 ### 依額度分流
 
 如果你有在追外部模型的用量，可以把 `dispatch.quotaFile` 指到一個 JSON 陣列（格式見英文版 README）。開 `out` 時模型會收到一行「哪個池子已經過底線、該改派哪裡」，用詞來自 `poolRouting`，額度表有變才會再送。
+
+這一行也會說該先花哪個池：開著的池裡，週窗口（`7d_reset_ts`、`gemini_7d_reset_ts` 或 `period_reset_ts`）最早重置、而且用量還不到 85% 的那個，因為它剩下的額度最先過期（`poolRouting.prefer`，可用 `{pool}`、`{used}`、`{reset}`）。名叫 `claude-sub` 的列是主模型自己的額度，永遠不會被挑成優先池；但當它的週窗口比所有外部池都早重置、又用不到一半時，會多加一句 `poolRouting.claudeSoon`，讓模型知道現在主線讀東西便宜，但批次工作還是外派。重置時間只顯示到整小時或整天，所以這一行最多每小時變一次。
 
 ## 嵌進別的 mod
 

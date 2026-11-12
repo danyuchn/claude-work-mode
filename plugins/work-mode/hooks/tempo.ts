@@ -5,7 +5,7 @@ import type { TempoMode } from '../types'
 import { DEFAULT_POOL_ROUTING, ensureConfig, getConfig, getHome, loadConfig, resolvePath } from './config'
 import type { WorkModeConfig } from './config'
 
-export { DEFAULT_PATTERN, ensureConfig, getConfig, loadConfig, resolveConfig } from './config'
+export { DEFAULT_PATTERN, ensureConfig, getConfig, getHome, loadConfig, resolveConfig } from './config'
 export type { WorkModeConfig } from './config'
 
 // /work-mode: per-session working modes. State lives in $.state, so it never leaks to other sessions.
@@ -24,6 +24,9 @@ const poolsSent = atom({ plugin: 'work-mode', key: 'poolsSent' } as const, '')
 // What a /work-mode switch tells the model. A command's `context` does not reach the model
 // (2.1.314), so it waits here for the next tool result (mid-turn) or the next prompt.
 const pending = atom({ plugin: 'work-mode', key: 'pending' } as const, [] as string[])
+// User prompts seen since the mode texts last went out: every reminderEveryTurns of them, a
+// one-line reminder rides with the prompt, so a long session does not drift off the modes.
+const prompts = atom({ plugin: 'work-mode', key: 'prompts' } as const, 0)
 
 // $.ui.status is one line per plugin. A host mod that joins several parts into one line swaps
 // this sink for its own: it takes the work-mode label and returns the whole line to show
@@ -120,9 +123,41 @@ export function modeText(m: TempoMode, cfg: WorkModeConfig = getConfig()): strin
   return m === 'dispatch' ? dispatchText(cfg) : m === 'converge' ? convergeText(cfg) : autonomousText(cfg)
 }
 
+/** The weekly (or period) window of a quota row: percent used and seconds to its reset. */
+function weekOf(r: Record<string, unknown> | undefined): { used: number; reset?: number } | undefined {
+  if (!r) return undefined
+  const keys = [
+    ['7d_used', '7d_reset_ts'],
+    ['gemini_7d_used', 'gemini_7d_reset_ts'],
+    ['period_used', 'period_reset_ts'],
+  ] as const
+  for (const [u, t] of keys) {
+    const used = r[u]
+    if (typeof used !== 'number') continue
+    const reset = r[t]
+    return { used, reset: typeof reset === 'number' && reset > 0 ? reset : undefined }
+  }
+  return undefined
+}
+
+/** `46h`, `3d`, `now`: coarse on purpose, so the line changes at most once an hour. */
+export function resetIn(reset: number | undefined, now: number): string {
+  if (reset === undefined) return '?'
+  const h = Math.floor((reset - now) / 3600)
+  if (h <= 0) return 'now'
+  if (h < 48) return `${h}h`
+  return `${Math.floor(h / 24)}d`
+}
+
+const PREFER_BELOW = 85 // a pool past this much of its week is not worth preferring
+const CLAUDE_ROOM = 50 // the main model's week counts as roomy below this
+const MAIN_POOL = 'claude-sub'
+
 /**
- * One routing line from an optional quota table, so out does not keep sending work to a refused pool.
- * The table is a JSON array of rows `{pool: "agy"|"codex", ...usage percents, route: "open"|"floor_5h"|"floor_7d", route_reset_ts}`.
+ * One routing line from an optional quota table, so out does not keep sending work to a refused pool
+ * and spends first the pool whose weekly window expires soonest.
+ * The table is a JSON array of rows `{pool: "agy"|"codex"|..., ...usage percents, route: "open"|"floor_5h"|"floor_7d", route_reset_ts}`;
+ * a row named `claude-sub` is the main model's own quota and is never preferred, only noted.
  */
 export function poolLine(raw: string, now = Date.now() / 1000, cfg: WorkModeConfig = getConfig()): string | undefined {
   let rows: Array<Record<string, unknown>>
@@ -140,9 +175,9 @@ export function poolLine(raw: string, now = Date.now() / 1000, cfg: WorkModeConf
   }
   const a = row('agy')
   const c = row('codex')
-  const show = (v: number | undefined) => (v === undefined ? '?' : `${v}%`)
+  const show = (v: number | undefined) => (v === undefined ? '?' : `${Math.round(v)}%`)
   const win = (r: Record<string, unknown> | undefined, five: string, week: string) =>
-    `5h ${show(num(r, five))} 7d ${show(num(r, week))}`
+    `5h ${show(num(r, five))} 7d ${show(num(r, week))}` + (weekOf(r)?.reset !== undefined ? ` (resets in ${resetIn(weekOf(r)?.reset, now)})` : '')
   if ([num(a, 'gemini_5h_used'), num(a, 'gemini_7d_used'), num(c, '5h_used'), num(c, '7d_used')].every(v => v === undefined)) return undefined
   const blocked = (r: Record<string, unknown> | undefined) => {
     const route = r?.route
@@ -154,10 +189,22 @@ export function poolLine(raw: string, now = Date.now() / 1000, cfg: WorkModeConf
   const agyOut = blocked(a)
   const codexOut = blocked(c)
   const head = `[tempo: pools] agy ${win(a, 'gemini_5h_used', 'gemini_7d_used')}${agyOut ? ` (refused: ${agyOut})` : ''}; codex ${win(c, '5h_used', '7d_used')}${codexOut ? ` (refused: ${codexOut})` : ''}.`
-  if (agyOut && codexOut) return `${head} ${routing.bothBlocked}`
-  if (agyOut) return `${head} ${routing.agyBlocked}`
-  if (codexOut) return `${head} ${routing.codexBlocked}`
-  return `${head} ${routing.bothOpen}`
+  const tail = agyOut && codexOut ? routing.bothBlocked : agyOut ? routing.agyBlocked : codexOut ? routing.codexBlocked : routing.bothOpen
+  const fill = (t: string, pool: string, used: number, reset: number | undefined) =>
+    t.split('{pool}').join(pool).split('{used}').join(show(used)).split('{reset}').join(resetIn(reset, now))
+  // Which open external pool to spend first: the one whose week resets soonest and still has room.
+  const open = rows
+    .filter(r => typeof r?.pool === 'string' && r.pool !== MAIN_POOL && !blocked(r))
+    .map(r => ({ pool: String(r.pool), w: weekOf(r) }))
+    .filter((x): x is { pool: string; w: { used: number; reset: number } } => x.w !== undefined && x.w.reset !== undefined && x.w.used < PREFER_BELOW)
+    .sort((x, y) => x.w.reset - y.w.reset || x.w.used - y.w.used)
+  const parts = [head, tail]
+  const first = open[0]
+  if (first && open.length > 1) parts.push(fill(routing.prefer, first.pool, first.w.used, first.w.reset))
+  const main = weekOf(row(MAIN_POOL))
+  if (main && main.reset !== undefined && main.used < CLAUDE_ROOM && (first === undefined || main.reset < first.w.reset))
+    parts.push(fill(routing.claudeSoon, MAIN_POOL, main.used, main.reset))
+  return parts.join(' ')
 }
 
 async function readPools($: EngineInterface): Promise<string | undefined> {
@@ -327,12 +374,31 @@ export async function tempoResend($: EngineInterface): Promise<void> {
 
 /** Context handed to the model with this prompt: the mode texts only when they are not in context yet. */
 export async function tempoContext($: EngineInterface, sessionId: string): Promise<string[]> {
-  await ensureConfig($)
+  const cfg = await ensureConfig($)
   const list = await read($, modes)
   await writeState($, sessionId, list)
   const queued = await takePending($)
   if (list.length === 0) return queued
-  return [...queued, ...(await modeTexts($, list))]
+  const wasSent = await read($, sent)
+  const texts = await modeTexts($, list)
+  if (!wasSent) {
+    await update($, prompts, () => 0)
+    return [...queued, ...texts]
+  }
+  const n = (await read($, prompts)) + 1
+  await update($, prompts, () => n)
+  const every = cfg.reminderEveryTurns
+  if (every > 0 && n % every === 0) texts.push(reminderText(list, cfg))
+  return [...queued, ...texts]
+}
+
+/** One line, every reminderEveryTurns prompts, so the modes outlast a long conversation. */
+export function reminderText(list: readonly TempoMode[], cfg: WorkModeConfig = getConfig()): string {
+  const parts: string[] = []
+  if (list.includes('autonomous')) parts.push('auto = decide internal reversible steps yourself, hard stops go on the pending list')
+  if (list.includes('dispatch')) parts.push(`out = batch reading and verifiable work go out (${cfg.dispatch.pickerHint}) before you read it; the main thread verifies`)
+  if (list.includes('converge')) parts.push(`wrap = no new branches, decisions under "${cfg.converge.sectionHeading}" with a label and a recommendation, close when nothing is open`)
+  return `[tempo] still on: ${list.map(m => SHORT[m]).join(' + ')}. ${parts.join('; ')}.`
 }
 
 async function modeTexts($: EngineInterface, list: readonly TempoMode[]): Promise<string[]> {
@@ -410,6 +476,7 @@ export function registerTempo(on: On): void {
     await update($, pending, () => switchTexts(prev, parsed.modes, prevSent, pools, cfg))
     await update($, modes, () => parsed.modes)
     await update($, sent, () => true)
+    await update($, prompts, () => 0)
     if (pools !== undefined) await update($, poolsSent, () => pools)
     await writeState($, await $.session.id(), parsed.modes)
     await refresh($)

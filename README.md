@@ -7,11 +7,21 @@ Session work modes for [Claude Code](https://claude.com/claude-code), switched w
 | Mode | What the model is told |
 | --- | --- |
 | `auto` | Do not stop to ask about internal, reversible steps (local files, local commits, tests). Hard stops (outgoing messages, installs, secrets, unrecoverable deletes, payments, permission changes, production changes) go to a pending list reported once at the end. Calls that will raise a confirmation prompt are run last, back to back. |
-| `out` | Delegate batch work a checker or spot check can verify (extraction, classification, summaries, reviews) to a background subagent or an external CLI; the main thread verifies. A one-time nudge fires when the main thread has read a lot of raw output in one turn without delegating. |
+| `out` | Delegate batch work a checker or spot check can verify (extraction, classification, summaries, reviews) to a background subagent or an external CLI; the main thread verifies. A one-time nudge fires when the main thread has read a lot of raw output in one turn without delegating, and past that point further reads are refused until the model delegates or declares in one line why it reads on (the read gate, below). |
 | `wrap` | Converge: open no new branches, finish what is open, list only new or changed decisions, each with a label and a recommendation. |
 | `off` | Back to normal. |
 
-Modes are per session, combine freely (`/work-mode auto wrap`), and `out wrap` together delegates only the work already open: delegated jobs count as open until their results are verified, so wrap's close waits for them. A bare `/work-mode` opens a multi-select picker. The mode text reaches the model once (with the next tool result or prompt) and again only after a compaction or resume, so it does not bloat every turn.
+Modes are per session, combine freely (`/work-mode auto wrap`), and `out wrap` together delegates only the work already open: delegated jobs count as open until their results are verified, so wrap's close waits for them. A bare `/work-mode` opens a multi-select picker. The mode text reaches the model once (with the next tool result or prompt) and again only after a compaction or resume, so it does not bloat every turn; a one-line reminder rides with every eighth prompt (`reminderEveryTurns`) so a long session does not drift off the modes.
+
+### The read gate (`out`)
+
+A reminder alone is easy to read past, so `out` also changes the default. Once the main thread has read `nudgeThresholdChars` of raw output in one turn with nothing delegated, the next `Read`, `Grep` or reader `Bash` call (`cat`, `sed`, `jq`, `grep`...) is refused with a how-to. The model then either delegates (any call matching `commandPattern`, or an Agent call when `subagentsDelegate` is on) or runs a no-op Bash declaring why it reads inline:
+
+```
+: # work-mode: inline the file is being edited next
+```
+
+Reads then pass for the rest of the turn, and the reason is appended to `~/.claude/state/tempo-inline/<session_id>.jsonl` for the next review. Paths matching `dispatch.corpusPattern` (transcripts, dumps, logs) are refused on their first read, before any count. Subagents are never gated. `dispatch.readGate: false` turns the gate off and keeps the nudge.
 
 ## Demo (60s Walkthrough)
 
@@ -42,7 +52,7 @@ The modes are written to `~/.claude/state/tempo/<session_id>` so shell hooks can
 | --- | --- | --- | --- |
 | `scratch-doc-guard.sh` | PreToolUse `Write` | asks before creating a new `SUMMARY*/REPORT*/NOTES*/FINDINGS*/ANALYSIS*.md` | denies: update the existing doc, use a scratch dir, or answer in the reply |
 | `git-safe-commit-gate.sh` | PreToolUse `Bash` | asks on `git commit` with paths (with or without `--`) and on `git add <file>...` when a file already had unstaged edits | denies: use `git add -p`, then a plain `git commit` |
-| `decision-label-guard.py` | Stop | blocks a reply whose decisions section holds an unlabeled item, or a tradeoff item that does not state what each side gains | same |
+| `decision-label-guard.py` | Stop | blocks a reply whose decisions section holds an unlabeled item, or a tradeoff item that does not state what each side gains | also blocks a reply whose closing lines offer to do something and ask first ("Shall I go ahead and...?"): under `auto` an internal step is done, a hard stop goes on the pending list as a labeled item |
 
 Use `tempo-auto.sh` in your own gates for anything you want converted. Keep real hard stops (secrets, force pushes, deploys) out of it: they should ask in every mode.
 
@@ -62,6 +72,10 @@ To personalise, create `~/.config/work-mode/config.json` (or point `WORK_MODE_CO
 | `dispatch.commandPattern` | `codex exec`, `gemini`, `claude -p` | a Bash command matching this regex counts as delegating |
 | `dispatch.nudgeThresholdChars` | `20000` | raw output read before the nudge fires (env `DISPATCH_NUDGE_CHARS` overrides) |
 | `dispatch.nudgeTemplate` | built in | nudge text; `{chars}` is filled in |
+| `dispatch.readGate` | `true` | past the nudge threshold, reads are refused until the model delegates or declares why it reads on |
+| `dispatch.corpusPattern` | none | regex of paths that are batch material: their first read is refused under `out` |
+| `dispatch.gateTemplate` | built in | the gate's refusal text; `{chars}` and `{hint}` are filled in |
+| `reminderEveryTurns` | `8` | every N prompts while a mode is on, a one-line reminder of the modes; `0` turns it off |
 | `dispatch.subagentsDelegate` | `true` | `false` when Claude subagents spend the same quota you want to save: spawning one no longer counts as delegating, and what they read counts toward the nudge (shown to the main thread) |
 | `dispatch.quotaFile` / `poolRouting` | none | optional quota table (see below) |
 | `converge.sectionHeading` | `Decisions Needed` / `待你決定` | heading for decision items |
@@ -74,7 +88,9 @@ The decision-label gate reads the same file for its heading and labels; without 
 
 If you track usage of external model pools, point `dispatch.quotaFile` at a JSON array like
 `[{"pool":"agy","gemini_5h_used":40,"gemini_7d_used":12,"route":"open"},{"pool":"codex","5h_used":97,"7d_used":15,"route":"floor_5h","route_used":97,"route_reset_ts":1767225600,"route_reset_in":"0h45m"}]`.
-With `out` on, the model then gets one line saying which pool is past its floor, worded by `poolRouting`, and it is repeated only when the table changes.
+With `out` on, the model then gets one line saying which pool is past its floor, worded by `poolRouting`, and it is repeated only when the table changes (reset times are shown in whole hours or days, so it changes at most hourly).
+
+The line also says which pool to spend first: among the open pools, the one whose weekly window (`7d_reset_ts`, `gemini_7d_reset_ts` or `period_reset_ts`) resets soonest and is still under 85% used, because what is left of it expires first (`poolRouting.prefer`, with `{pool}`, `{used}` and `{reset}`). A row named `claude-sub` is the main model's own quota: it is never preferred, but when its week resets before every external pool's and it is under half used, `poolRouting.claudeSoon` is added so the model knows inline reading is cheap right now while batches still go out.
 
 ## Embedding in another mod
 

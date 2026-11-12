@@ -7,6 +7,7 @@ declare module 'claude-code' {
       autoSent: boolean
       poolsSent: string
       pending: string[]
+      prompts: number
     }
   }
 }

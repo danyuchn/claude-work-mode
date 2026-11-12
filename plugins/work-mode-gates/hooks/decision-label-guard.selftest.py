@@ -129,6 +129,40 @@ check("e2e second pass", r.stdout.strip() == "")
 r = subprocess.run([sys.executable, str(HOOK)], input="not json", capture_output=True, text=True)
 check("e2e bad input fails open", r.returncode == 0 and r.stdout.strip() == "")
 
+# auto guard: offer-questions in the closing lines block only while the session has auto on
+OFFERS = [
+    ("zh offer blocks", "已照辦：改好三處。\n\n要我先擬好回信嗎？\n", 1),
+    ("zh 需要我 blocks", "整理完了。需要我把這段也補進主檔嗎？\n", 1),
+    ("zh 要不要我 blocks", "結果如上。要不要我順便把舊檔刪掉？\n", 1),
+    ("zh 我可以…嗎 blocks", "報表好了。我可以先把它搬到 Downloads 嗎？\n", 1),
+    ("zh labeled hard stop passes", "**待你決定**\n- [對外] 要不要我把草稿寄給客戶？建議寄。\n", 0),
+    ("zh statement passes", "已照辦：三個檔案都改好並 commit。沒有要你決定的事。\n", 0),
+    ("zh question inside draft block passes", "草稿如下：\n```\n要不要我幫您預約？\n```\n已存成草稿。\n", 0),
+    ("zh early question outside tail passes", "要我先擬好嗎？\n" + "說明。" * 400 + "\n全部做完了。\n", 0),
+    ("en offer blocks", "Done with the refactor.\n\nShall I go ahead and update the README as well?\n", 1),
+    ("en want me blocks", "Tests pass. Do you want me to squash the commits?\n", 1),
+    ("en labeled passes", "## Decisions Needed\n- [outbound] Should I send the reply to the client? I recommend yes.\n", 0),
+    ("en statement passes", "All done; the three files are committed.\n", 0),
+    ("quoted user words pass", "> 要不要我幫你訂？\n上面是他原話，我已照辦。\n", 0),
+]
+with tempfile.TemporaryDirectory() as d:
+    env = {"TEMPO_STATE_DIR": d}
+    with open(os.path.join(d, "sid-auto"), "w") as f:
+        json.dump({"modes": ["autonomous", "converge"]}, f)
+    with open(os.path.join(d, "sid-wrap"), "w") as f:
+        json.dump({"modes": ["converge"]}, f)
+    for name, msg, want in OFFERS:
+        r = run(msg, env, session_id="sid-auto")
+        check("auto " + name, ('"decision": "block"' in r.stdout) == bool(want), r.stdout[:80])
+    r = run(OFFERS[0][1], env, session_id="sid-wrap")
+    check("auto guard is silent without auto", r.stdout.strip() == "")
+    r = run(OFFERS[0][1], env, session_id="../sid-auto")
+    check("auto guard ignores a traversal sid", r.stdout.strip() == "")
+    r = run(OFFERS[0][1], env, session_id="sid-auto")
+    check("auto reason says to do it", "AUTO GUARD" in r.stdout and ("Dus" + "tin") not in r.stdout)
+    r = run(OFFERS[8][1], env, session_id="sid-auto")
+    check("auto en reason is English", "AUTO GUARD: the reply ends" in json.loads(r.stdout or "{}").get("reason", ""))
+
 # custom labels and heading from a config file
 with tempfile.TemporaryDirectory() as d:
     cfg = os.path.join(d, "config.json")
