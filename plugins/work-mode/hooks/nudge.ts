@@ -104,7 +104,48 @@ function corpusPattern(cfg: WorkModeConfig): RegExp | undefined {
 /** `: # work-mode: inline <reason>` anywhere in a Bash command declares inline reading for the turn. */
 export const INLINE = /#\s*work-mode:\s*inline\b[ \t]*([^\n]*)/
 /** A Bash command whose first word in any segment prints file contents counts as a read. */
-const READER = /(^|[;&|(\s])(?:cat|head|tail|sed|less|more|bat|jq|awk|grep|rg|ag|strings|xxd|hexdump)\s/
+const READER = /^(?:cat|head|tail|sed|less|more|bat|jq|awk|grep|rg|ag|strings|xxd|hexdump|cut|sort|uniq|wc|tr|xargs\s+cat|python3?\s+-c|node\s+-e|perl\s+-e|ruby\s+-e)(?:\s|$)/
+
+/** Mask quoted text and heredoc bodies, and retain real shell comments separately. */
+function shellParts(command: string): { visible: string; comments: string[] } {
+  let visible = ''
+  const comments: string[] = []
+  let heredoc: string | undefined
+  let quote = ''
+  for (const line of command.split('\n')) {
+    if (heredoc !== undefined) {
+      if (line.trim() === heredoc) heredoc = undefined
+      visible += '\n'
+      continue
+    }
+    let masked = ''
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]
+      if (ch === '\\' && quote !== "'") { masked += '  '; i++; continue }
+      if (quote) { if (ch === quote) quote = ''; masked += ' '; continue }
+      if (ch === "'" || ch === '"') { quote = ch; masked += ' '; continue }
+      if (ch === '#' && (i === 0 || /[\s;|&()]/.test(line[i - 1] ?? ''))) {
+        comments.push(line.slice(i)); break
+      }
+      masked += ch
+    }
+    const marker = line.match(/<<-?\s*['"]?([A-Za-z_][\w-]*)['"]?/)
+    if (marker && /<<-?/.test(masked)) heredoc = marker[1]
+    visible += masked + '\n'
+  }
+  return { visible, comments }
+}
+
+function segments(visible: string): string[] {
+  return visible.split(/[;&|()\n]+/).map(s => s.trim()).filter(Boolean)
+}
+
+function isDispatch(visible: string, cfg: WorkModeConfig): boolean {
+  return segments(visible).some(s => {
+    const match = dispatchPattern(cfg).exec(s)
+    return match !== null && match.index === 0
+  })
+}
 
 /** Feeds one finished tool call in (`subagent`: it ran inside a subagent); returns the nudge text the one time it is due. */
 export function observe(
@@ -118,7 +159,7 @@ export function observe(
   const viaClaude = cfg.dispatch.subagentsDelegate
   if (subagent && viaClaude) return undefined
   const cmd = String((input as { command?: unknown } | null)?.command ?? '')
-  if ((viaClaude && (tool === 'Agent' || tool === 'Workflow')) || dispatchPattern(cfg).test(cmd)) dispatched = true
+  if ((viaClaude && (tool === 'Agent' || tool === 'Workflow')) || (tool === 'Bash' && isDispatch(shellParts(cmd).visible, cfg))) dispatched = true
   if (tool === 'Read' || tool === 'Bash' || tool === 'Grep' || tool === 'WebFetch') chars += responseLength(response)
   if (!dispatched && !nudged && chars >= threshold) {
     nudged = true
@@ -142,13 +183,15 @@ export function gate(
   if (!cfg.dispatch.readGate) return undefined
   const inp = (input ?? {}) as Record<string, unknown>
   const cmd = tool === 'Bash' ? String(inp.command ?? '') : ''
+  const shell = shellParts(cmd)
   if (tool === 'Bash') {
-    const m = INLINE.exec(cmd)
+    const m = shell.comments.map(comment => INLINE.exec(comment)).find(Boolean)
     if (m) {
-      declared = (m[1] ?? '').trim() || '(no reason given)'
+      const reason = (m[1] ?? '').trim()
+      if (reason.length < 3) return { deny: gateText(chars, undefined, cfg) }
+      declared = reason
       return { declared }
     }
-    if (dispatchPattern(cfg).test(cmd)) return undefined
   }
   if (tool === 'Agent' && !cfg.dispatch.subagentsDelegate) {
     const m = WHY_CLAUDE.exec(String(inp.prompt ?? ''))
@@ -156,14 +199,14 @@ export function gate(
     return { deny: agentText(cfg) }
   }
   if (declared !== undefined || dispatched) return undefined
-  const reads = tool === 'Read' || tool === 'Grep' || tool === 'WebFetch' || (tool === 'Bash' && READER.test(cmd))
-  if (!reads) return undefined
-  const target = tool === 'Bash' ? cmd : String(inp.file_path ?? inp.path ?? inp.url ?? '')
+  const reads = tool === 'Read' || tool === 'Grep' || tool === 'WebFetch' || (tool === 'Bash' && segments(shell.visible).some(s => READER.test(s)))
   const c = corpusPattern(cfg)
-  if (c && target && c.test(target)) {
-    const hit = tool === 'Bash' ? (cmd.match(/\S*(?:\.jsonl|transcript\S*|\S+)/)?.[0] ?? cmd).slice(0, 80) : target
-    return { deny: gateText(chars, hit, cfg) }
+  const target = tool === 'Bash' ? cmd : String(inp.file_path ?? inp.path ?? inp.url ?? '')
+  if (declared === undefined && reads && c && target && (c.test(target) || (tool === 'Bash' && target.split(/\s+/).some(word => c.test(word))))) {
+    return { deny: gateText(chars, target.slice(0, 80), cfg) }
   }
+  if (tool === 'Bash' && isDispatch(shell.visible, cfg)) return undefined
+  if (!reads) return undefined
   if (chars >= threshold) return { deny: gateText(chars, undefined, cfg) }
   return undefined
 }

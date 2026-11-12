@@ -418,6 +418,25 @@ test('C: gate verdicts: threshold, corpus, inline declaration, delegation, reade
   expectNeutral([gateText(5, undefined, DEFAULT_CONFIG_EN), gateText(5, '/x.jsonl', DEFAULT_CONFIG_EN)])
 })
 
+test('C: shell reader segments, quoted declarations and dispatch bypasses', () => {
+  const cfg = { ...DEFAULT_CONFIG_EN, dispatch: { ...DEFAULT_CONFIG_EN.dispatch, corpusPattern: '\\.jsonl$' } }
+  resetNudge()
+  expect(denyOf(gate('Bash', { command: "echo 'gemini -p test'; cat transcript.jsonl" }, 100, cfg))).toBeDefined()
+  expect(denyOf(gate('Bash', { command: 'gemini -p test; cat transcript.jsonl' }, 100, cfg))).toBeDefined()
+  observe('Read', {}, 'x'.repeat(150), 100, cfg)
+  for (const command of ['echo "run cat later"', 'git commit -m "fix grep handling"', "echo '# work-mode: inline example'"]) {
+    expect(gate('Bash', { command }, 100, cfg)).toBe(undefined)
+  }
+  expect(denyOf(gate('Read', { file_path: '/a' }, 100, cfg))).toBeDefined()
+  expect(gate('Bash', { command: 'echo <<EOF\ncat x\nEOF' }, 100, cfg)).toBe(undefined)
+  expect(gate('Bash', { command: "echo <<'EOF'\ncat x\nEOF" }, 100, cfg)).toBe(undefined)
+  for (const command of ['cat x', 'cd a && sed -n 1,9p f', 'jq . f | head', 'python -c x', 'python3 -c x', 'cut f', 'sort f', 'uniq f', 'wc f', 'tr a b', 'xargs cat', 'node -e x', 'perl -e x', 'ruby -e x'])
+    expect(denyOf(gate('Bash', { command }, 100, cfg))).toBeDefined()
+  expect(denyOf(gate('Bash', { command: ': # work-mode: inline' }, 100, cfg))).toContain('reason')
+  expect(denyOf(gate('Bash', { command: ': # work-mode: inline ab' }, 100, cfg))).toBeDefined()
+  expect(gate('Bash', { command: ': # work-mode: inline valid reason' }, 100, cfg)).toEqual({ declared: 'valid reason' })
+})
+
 test('C: the gate denies with out on, lifts on a declaration, stays off otherwise', async ($, on) => {
   world(on)
   await start($)
@@ -460,6 +479,16 @@ test('C: a one-line reminder every N prompts, counted from the last full text', 
   expectNeutral(third)
   expect(resolveConfig({ reminderEveryTurns: 0 }).reminderEveryTurns).toBe(0)
   expect(resolveConfig({ reminderEveryTurns: 'x' }).reminderEveryTurns).toBe(8)
+})
+
+test('C: stale and non-finite quota snapshots are excluded from routing', () => {
+  const raw = '[{"pool":"agy","gemini_7d_used":10,"gemini_7d_reset_ts":9000},{"pool":"codex","7d_used":20,"7d_reset_ts":20000},{"pool":"claude-sub","7d_used":10,"7d_reset_ts":9000}]'
+  const line = poolLine(raw, 10000, DEFAULT_CONFIG_EN) ?? ''
+  expect(line).toContain('Spend codex first')
+  expect(line).not.toContain('main model')
+  const infinite = poolLine('[{"pool":"agy","gemini_5h_used":1e999,"gemini_7d_used":1e999,"gemini_7d_reset_ts":1e999},{"pool":"codex","7d_used":20,"7d_reset_ts":20000}]', 10000, DEFAULT_CONFIG_EN) ?? ''
+  expect(infinite).toContain('agy 5h ? 7d ?')
+  expect(infinite).not.toContain('Infinity')
 })
 
 test('C: pool line prefers the open pool whose week resets first; the main model is noted, never preferred', () => {

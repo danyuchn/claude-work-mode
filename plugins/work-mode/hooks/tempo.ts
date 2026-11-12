@@ -135,9 +135,9 @@ function weekOf(r: Record<string, unknown> | undefined): { used: number; reset?:
   ] as const
   for (const [u, t] of keys) {
     const used = r[u]
-    if (typeof used !== 'number') continue
+    if (typeof used !== 'number' || !Number.isFinite(used)) continue
     const reset = r[t]
-    return { used, reset: typeof reset === 'number' && reset > 0 ? reset : undefined }
+    return { used, reset: typeof reset === 'number' && Number.isFinite(reset) && reset > 0 ? reset : undefined }
   }
   return undefined
 }
@@ -173,7 +173,7 @@ export function poolLine(raw: string, now = Date.now() / 1000, cfg: WorkModeConf
   const row = (pool: string) => rows.find(r => r?.pool === pool)
   const num = (r: Record<string, unknown> | undefined, key: string) => {
     const v = r?.[key]
-    return typeof v === 'number' ? v : undefined
+    return typeof v === 'number' && Number.isFinite(v) ? v : undefined
   }
   const a = row('agy')
   const c = row('codex')
@@ -198,13 +198,14 @@ export function poolLine(raw: string, now = Date.now() / 1000, cfg: WorkModeConf
   const open = rows
     .filter(r => typeof r?.pool === 'string' && r.pool !== MAIN_POOL && !blocked(r))
     .map(r => ({ pool: String(r.pool), w: weekOf(r) }))
-    .filter((x): x is { pool: string; w: { used: number; reset: number } } => x.w !== undefined && x.w.reset !== undefined && x.w.used < PREFER_BELOW)
+    .filter((x): x is { pool: string; w: { used: number; reset: number } } => x.w !== undefined && x.w.reset !== undefined && x.w.reset >= now && x.w.used < PREFER_BELOW)
     .sort((x, y) => x.w.reset - y.w.reset || x.w.used - y.w.used)
   const parts = [head, tail]
   const first = open[0]
-  if (first && open.length > 1) parts.push(fill(routing.prefer, first.pool, first.w.used, first.w.reset))
+  const stale = rows.some(r => r?.pool !== MAIN_POOL && (weekOf(r)?.reset ?? now) < now)
+  if (first && (open.length > 1 || stale)) parts.push(fill(routing.prefer, first.pool, first.w.used, first.w.reset))
   const main = weekOf(row(MAIN_POOL))
-  if (main && main.reset !== undefined && main.used < CLAUDE_ROOM && (first === undefined || main.reset < first.w.reset))
+  if (main && main.reset !== undefined && main.reset >= now && main.used < CLAUDE_ROOM && (first === undefined || main.reset < first.w.reset))
     parts.push(fill(routing.claudeSoon, MAIN_POOL, main.used, main.reset))
   return parts.join(' ')
 }

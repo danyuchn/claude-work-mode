@@ -190,15 +190,17 @@ OFFER_EN = re.compile(
     re.I,
 )
 TAIL_CHARS = 700
+HARD_STOP_OR_FACT = re.compile(r"寄|發送|送出|傳給|刪除|刪掉|付款|退款|轉帳|權限|安裝|密碼|憑證|正式|production|send|email|delete|pay|refund|install|permission|credential|password|deploy|which|哪一個|哪個|你的|your", re.I)
 
 
 def offers(msg: str) -> list:
     """Offer-questions in the closing lines, outside code blocks and labeled decision items."""
     text = re.sub(r"```.*?```", " ", msg, flags=re.S)
-    tail = text[-TAIL_CHARS:]
+    paragraphs = re.split(r"\n\s*\n", text.rstrip())
+    tail = "\n".join((paragraphs[-1], "\n".join(text.splitlines()[-3:])))
     out = []
-    for ln in tail.splitlines():
-        if LABEL.search(ln) or ln.lstrip().startswith(">"):
+    for ln in dict.fromkeys(tail.splitlines()):
+        if LABEL.search(ln) or HARD_STOP_OR_FACT.search(ln) or ln.lstrip().startswith(">"):
             continue
         for rx in (OFFER_ZH, OFFER_EN):
             m = rx.search(ln)
@@ -216,7 +218,7 @@ def modes_on(data: dict) -> list:
     try:
         with open(os.path.join(base, sid), encoding="utf-8") as f:
             modes = json.load(f).get("modes") or []
-        return modes if isinstance(modes, list) else []
+        return modes if isinstance(modes, list) and all(isinstance(m, str) for m in modes) else []
     except (OSError, ValueError, AttributeError):
         return []
 
@@ -264,8 +266,6 @@ def prior_replies(data: dict) -> list:
     out = []
     last_user = ""
     for ln in raw.splitlines():
-        if '"type":"assistant"' not in ln and '"type":"user"' not in ln:
-            continue
         try:
             d = json.loads(ln)
         except ValueError:
