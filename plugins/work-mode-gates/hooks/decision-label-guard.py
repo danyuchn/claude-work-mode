@@ -29,7 +29,9 @@ reposted decisions) are delivered: "block" (default) blocks the Stop; "next-turn
 through, stores the finding in the session's state file, and `decision-label-guard.py --surface`
 (a UserPromptSubmit hook) hands it to the model with the user's next message, so a format slip
 never costs an extra model turn. The auto-mode offer check always blocks: it decides whether
-work gets done, not how the reply looks.
+work gets done, not how the reply looks; a Stop it blocks carries the format findings too, since
+the rewrite is the next reply and nothing would clear a stored note afterwards. The stored note
+holds only the latest reply's findings, and a reply without any removes it.
 
 Fail-open on parse problems; the second pass (stop_hook_active) always passes.
 """
@@ -406,16 +408,26 @@ def surface():
 
 
 def defer(data: dict, text: str) -> bool:
+    """Store this reply's findings for the next prompt, replacing an older reply's."""
     p = notes_path(data)
     if not p:
         return False
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
+        with open(p, "w", encoding="utf-8") as f:
             f.write(text + "\n")
         return True
     except OSError:
         return False
+
+
+def clear_notes(data: dict):
+    p = notes_path(data)
+    if p:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
 
 
 def main():
@@ -436,16 +448,16 @@ def main():
     modes = modes_on(data)
     found = offers(msg) if "autonomous" in modes else []
     again = reposted(msg, data) if "converge" in modes and not bad else []
-    if not bad and not weak and not found and not again:
-        return
     fmt = []
     if bad or weak:
         fmt.append(reason(msg, bad, weak))
     if again:
         fmt.append(repost_reason(msg, again))
-    parts = []
-    if fmt and not (ENFORCE == "next-turn" and defer(data, "\n".join(fmt))):
-        parts.extend(fmt)
+    # A Stop the offer check blocks is rewritten now, so its format findings go with the block.
+    deferred = ENFORCE == "next-turn" and fmt and not found and defer(data, "\n".join(fmt))
+    if ENFORCE == "next-turn" and not deferred:
+        clear_notes(data)  # an older reply's note is stale once this reply is judged
+    parts = [] if deferred else list(fmt)
     if found:
         parts.append(offer_reason(msg, found))
     if parts:

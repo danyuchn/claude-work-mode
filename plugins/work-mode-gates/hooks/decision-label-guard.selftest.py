@@ -263,5 +263,17 @@ with tempfile.TemporaryDirectory() as d:
     check("next-turn: auto offer still blocks", '"decision": "block"' in r.stdout, r.stdout)
     r = run(CASES[1][1], env)
     check("next-turn: no session id falls back to blocking", '"decision": "block"' in r.stdout)
+    # a Stop blocked by the offer check carries the format finding and stores nothing, so the clean
+    # rewrite (a stop_hook_active pass the hook skips) leaves no stale note for the next prompt
+    r = run(CASES[1][1] + "\n\n要我接著把測試也補上嗎？", env, session_id="s2")
+    check("next-turn: blocked Stop carries the format finding", "DECISION-LABEL" in r.stdout and "AUTO GUARD" in r.stdout, r.stdout[:120])
+    check("next-turn: blocked Stop stores no note", not os.path.exists(os.path.join(d, "s2.format-notes")))
+    # the note holds the latest reply's findings only, and a compliant reply clears it
+    run(CASES[1][1], env, session_id="s1")
+    run(CASES[1][1], env, session_id="s1")
+    with open(notes, encoding="utf-8") as f:
+        check("next-turn: note replaced, not appended", f.read().count("DECISION-LABEL") == 1)
+    run("改好了，三個檔都 commit 了。", env, session_id="s1")
+    check("next-turn: compliant reply clears the note", not os.path.exists(notes))
 
 sys.exit(1 if fail else 0)
