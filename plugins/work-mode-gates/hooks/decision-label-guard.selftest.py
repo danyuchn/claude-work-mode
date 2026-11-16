@@ -238,4 +238,30 @@ with tempfile.TemporaryDirectory() as d:
     r = run("**待你決定**\n1. [取捨] A 的好處…；B 的好處…\n", env)
     check("broken config falls back to defaults", r.stdout.strip() == "")
 
+# enforcement "next-turn": format findings pass the Stop, are stored, and surface once on the next prompt;
+# the auto-mode offer check still blocks.
+with tempfile.TemporaryDirectory() as d:
+    cfg = os.path.join(d, "c.json")
+    with open(cfg, "w", encoding="utf-8") as f:
+        json.dump({"converge": {"enforcement": "next-turn"}}, f)
+    env = {"WORK_MODE_CONFIG": cfg, "TEMPO_STATE_DIR": d}
+    r = run(CASES[1][1], env, session_id="s1")
+    check("next-turn: unlabeled item does not block", r.stdout.strip() == "", r.stdout)
+    notes = os.path.join(d, "s1.format-notes")
+    check("next-turn: finding stored", os.path.exists(notes))
+    s = subprocess.run([sys.executable, str(HOOK), "--surface"], input=json.dumps({"session_id": "s1"}),
+                       capture_output=True, text=True, env={**os.environ, **env})
+    ctx = json.loads(s.stdout or "{}").get("hookSpecificOutput", {}).get("additionalContext", "")
+    check("next-turn: surfaced on the next prompt", "[format-note]" in ctx and "DECISION-LABEL" in ctx, s.stdout)
+    check("next-turn: surfaced once", not os.path.exists(notes))
+    s = subprocess.run([sys.executable, str(HOOK), "--surface"], input=json.dumps({"session_id": "s1"}),
+                       capture_output=True, text=True, env={**os.environ, **env})
+    check("next-turn: nothing left to surface", s.stdout.strip() == "")
+    with open(os.path.join(d, "s2"), "w") as f:
+        json.dump({"modes": ["autonomous"]}, f)
+    r = run("改好了。\n\n要我接著把測試也補上嗎？", env, session_id="s2")
+    check("next-turn: auto offer still blocks", '"decision": "block"' in r.stdout, r.stdout)
+    r = run(CASES[1][1], env)
+    check("next-turn: no session id falls back to blocking", '"decision": "block"' in r.stdout)
+
 sys.exit(1 if fail else 0)

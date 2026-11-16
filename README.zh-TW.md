@@ -79,6 +79,7 @@
 | `reminderEveryTurns` | `8` | 模式開著時每 N 則訊息送一行提醒；`0` 關掉 |
 | `dispatch.quotaFile`／`poolRouting` | 無 | 選用的額度表（見下） |
 | `converge.sectionHeading` | `待你決定`／`Decisions Needed` | 待決區塊標題 |
+| `converge.enforcement` | `block` | 設 `next-turn` 時，標籤或重貼待決這類格式問題不擋回覆，改在下一則訊息時提醒模型，不多耗回合（auto 模式的「結尾問要不要做」照樣擋） |
 | `converge.decisionLabels`／`tradeoffLabel` | `對外 金流 刪除 權限 取捨` | 每個待決項目開頭必須帶的標籤 |
 | `converge.autoCloseCommand` | `null` | 沒有未完成事項時模型自己跑的指令，例如收尾用的 skill |
 

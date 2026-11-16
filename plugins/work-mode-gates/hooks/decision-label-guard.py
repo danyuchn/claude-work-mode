@@ -24,6 +24,13 @@ the reply's closing lines may not end on an offer-question to the user ("要我�
 "Shall I go ahead and ...?"): auto means do it, or put a hard stop on the pending list with a
 label and a recommendation. A line that carries a decision label is left alone.
 
+converge.enforcement in the config chooses how format findings (labels, one-sided tradeoffs,
+reposted decisions) are delivered: "block" (default) blocks the Stop; "next-turn" lets the reply
+through, stores the finding in the session's state file, and `decision-label-guard.py --surface`
+(a UserPromptSubmit hook) hands it to the model with the user's next message, so a format slip
+never costs an extra model turn. The auto-mode offer check always blocks: it decides whether
+work gets done, not how the reply looks.
+
 Fail-open on parse problems; the second pass (stop_hook_active) always passes.
 """
 import json
@@ -52,6 +59,7 @@ def _strings(v):
 
 
 _conf = load_config()
+ENFORCE = "next-turn" if _conf.get("enforcement") == "next-turn" else "block"
 LABELS = _strings(_conf.get("decisionLabels")) or DEFAULT_LABELS
 _trade = _conf.get("tradeoffLabel")
 TRADEOFFS = [_trade] if isinstance(_trade, str) and _trade.strip() else DEFAULT_TRADEOFF
@@ -368,7 +376,52 @@ def reason(msg: str, bad: list, weak: list) -> str:
     return "DECISION-LABEL GUARD：" + "\n".join(parts)
 
 
+def notes_path(data: dict):
+    sid = data.get("session_id")
+    if not isinstance(sid, str) or not sid:
+        return None
+    base = os.environ.get("TEMPO_STATE_DIR") or os.path.expanduser("~/.claude/state/tempo")
+    return os.path.join(base, re.sub(r"\W", "_", sid) + ".format-notes")
+
+
+def surface():
+    """UserPromptSubmit: hand last reply's format notes to the model once, then forget them."""
+    try:
+        data = json.load(sys.stdin)
+    except ValueError:
+        return
+    p = notes_path(data) if isinstance(data, dict) else None
+    if not p or not os.path.exists(p):
+        return
+    try:
+        with open(p, encoding="utf-8") as f:
+            text = f.read().strip()
+        os.remove(p)
+    except OSError:
+        return
+    if text:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext":
+              "[format-note] 上一則回覆有格式問題，這一則照著調整；只改呈現方式，沒有新證據就不改實質結論，"
+              "也不用為此另外道歉或重貼上一則：\n" + text}}, ensure_ascii=False))
+
+
+def defer(data: dict, text: str) -> bool:
+    p = notes_path(data)
+    if not p:
+        return False
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
+        return True
+    except OSError:
+        return False
+
+
 def main():
+    if "--surface" in sys.argv[1:]:
+        surface()
+        return
     try:
         data = json.load(sys.stdin)
     except ValueError:
@@ -385,14 +438,18 @@ def main():
     again = reposted(msg, data) if "converge" in modes and not bad else []
     if not bad and not weak and not found and not again:
         return
-    parts = []
+    fmt = []
     if bad or weak:
-        parts.append(reason(msg, bad, weak))
+        fmt.append(reason(msg, bad, weak))
+    if again:
+        fmt.append(repost_reason(msg, again))
+    parts = []
+    if fmt and not (ENFORCE == "next-turn" and defer(data, "\n".join(fmt))):
+        parts.extend(fmt)
     if found:
         parts.append(offer_reason(msg, found))
-    if again:
-        parts.append(repost_reason(msg, again))
-    print(json.dumps({"decision": "block", "reason": "\n".join(parts)}, ensure_ascii=False))
+    if parts:
+        print(json.dumps({"decision": "block", "reason": "\n".join(parts)}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -79,6 +79,7 @@ To personalise, create `~/.config/work-mode/config.json` (or point `WORK_MODE_CO
 | `dispatch.subagentsDelegate` | `true` | `false` when Claude subagents spend the same quota you want to save: spawning one no longer counts as delegating, and what they read counts toward the nudge (shown to the main thread) |
 | `dispatch.quotaFile` / `poolRouting` | none | optional quota table (see below) |
 | `converge.sectionHeading` | `Decisions Needed` / `待你決定` | heading for decision items |
+| `converge.enforcement` | `block` | `next-turn` lets a reply with label or repost slips through and hands the note to the model with the next prompt, so format fixes cost no extra turn (the auto-mode offer check always blocks) |
 | `converge.decisionLabels` / `tradeoffLabel` | `outbound payment delete permission tradeoff` | labels each decision must start with |
 | `converge.autoCloseCommand` | `null` | a command the model runs on its own when nothing is open, e.g. a session-closing skill |
 

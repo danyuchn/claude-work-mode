@@ -34,6 +34,7 @@
   "reminderEveryTurns": 8,
   "converge": {
     "sectionHeading": "Decisions Needed",
+    "enforcement": "block",
     "decisionLabels": [
       "outbound",
       "payment",
